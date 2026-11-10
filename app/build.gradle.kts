@@ -11,8 +11,8 @@ android {
         applicationId = "de.schachassistent"
         minSdk = 26          // TYPE_APPLICATION_OVERLAY braucht API 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
 
         // Stockfish liegt nur für 64-Bit-ARM bei (alle aktuellen Samsung-Geräte).
         ndk { abiFilters += "arm64-v8a" }

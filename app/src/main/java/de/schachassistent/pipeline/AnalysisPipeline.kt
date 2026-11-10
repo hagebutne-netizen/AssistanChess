@@ -2,6 +2,7 @@ package de.schachassistent.pipeline
 
 import de.schachassistent.board.BoardCalibrationStore
 import de.schachassistent.board.BoardRegion
+import de.schachassistent.board.Square
 import de.schachassistent.capture.ScreenCapturer
 import de.schachassistent.engine.ChessEngine
 import de.schachassistent.engine.EngineFactory
@@ -44,6 +45,7 @@ class AnalysisPipeline(
     private var liveJob: Job? = null
     private var searchJob: Job? = null
     private var lastFen: String? = null
+    private var lastPieces: Map<Square, Char?>? = null
     @Volatile private var forceRead = false
 
     init {
@@ -109,7 +111,7 @@ class AnalysisPipeline(
     /** Stellung kam direkt vom Spiel. */
     fun onDirectFen() { directFen.latestFen?.let { respond(it) } }
 
-    fun onRegionChanged() { tracker.reset(); lastFen = null; forceRead = true }
+    fun onRegionChanged() { tracker.reset(); lastFen = null; lastPieces = null; forceRead = true }
 
     fun close() {
         liveJob?.cancel()
@@ -194,11 +196,28 @@ class AnalysisPipeline(
             overlay.setStatus("Kein Brett erkannt")
             return false
         }
+        // Felder unter der Leiste o. ä.: letzten bekannten Stand übernehmen
+        var pieces = reading.pieces
+        if (reading.unknown.isNotEmpty()) {
+            val prev = lastPieces
+            if (prev == null) {
+                overlay.moveBarOffBoard(region)
+                overlay.setStatus("Leiste lag auf dem Brett – verschoben"); return false
+            }
+            pieces = pieces + reading.unknown.associateWith { prev[it] }
+        }
+        val kings = pieces.values.count { it == 'K' } to pieces.values.count { it == 'k' }
+        if (kings.first != 1 || kings.second != 1) {
+            overlay.clearArrows()
+            overlay.setStatus(if (kings.first != 1) "Weißer König nicht erkannt" else "Schwarzer König nicht erkannt")
+            return false
+        }
+        lastPieces = pieces
         val mySide = mySide(region)
-        tracker.update(reading.pieces, mySide)
+        tracker.update(pieces, mySide)
         val side = tracker.sideToMove ?: mySide
-        val fen = Fen.build(reading.pieces, side) ?: run {
-            overlay.clearArrows(); overlay.setStatus("Stellung unklar (Könige?)"); return false
+        val fen = Fen.build(pieces, side) ?: run {
+            overlay.clearArrows(); overlay.setStatus("Stellung ungültig (Bauer auf Grundreihe?)"); return false
         }
         if (fen != lastFen || overlay.currentArrows.isEmpty()) respond(fen)
         return true
@@ -261,6 +280,7 @@ class AnalysisPipeline(
     }
 
     private suspend fun learnIfStart(region: BoardRegion): Boolean {
+        overlay.moveBarOffBoard(region)
         val whiteAtBottom = vision.learn(region, overlay.occlusionMask(region)) ?: return false
         val updated = region.copy(whiteAtBottom = whiteAtBottom)
         store.save(updated)

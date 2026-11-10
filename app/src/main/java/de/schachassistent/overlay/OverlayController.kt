@@ -73,6 +73,7 @@ class OverlayController(
         safeAdd(arrowView, fullScreenParams(touchable = false))
         buildControlBar()
         safeAdd(controlBar, controlParams)
+        arrowView.region?.let { moveBarOffBoard(it) }
         setStatus("Bereit")
         setTurn(Turn.UNKNOWN)
     }
@@ -93,7 +94,33 @@ class OverlayController(
     fun clearArrows() = showArrows(emptyList())
 
     fun setStatus(text: String) { if (::statusText.isInitialized) statusText.text = text }
-    fun setRegion(region: BoardRegion) { arrowView.region = region }
+    fun setRegion(region: BoardRegion) {
+        arrowView.region = region
+        moveBarOffBoard(region)
+    }
+
+    /** Steuerleiste so platzieren, dass sie das Brett nicht verdeckt (über oder unter dem Brett). */
+    fun moveBarOffBoard(region: BoardRegion) {
+        if (!::controlBar.isInitialized || !controlBar.isAttachedToWindow) return
+        controlBar.post {
+            val loc = IntArray(2); controlBar.getLocationOnScreen(loc)
+            val barH = controlBar.height.coerceAtLeast(dp(100))
+            val barTop = loc[1]; val barBottom = loc[1] + barH
+            if (barBottom < region.top || barTop > region.top + region.height) return@post   // liegt schon frei
+            val screenH = de.schachassistent.capture.ScreenMetrics.realSize(context).y
+            val m = dp(8)
+            val spaceAbove = region.top - dp(32)          // Statusleiste freilassen
+            val spaceBelow = screenH - (region.top + region.height) - dp(48)
+            // Fensterkoordinate y ist relativ zur Position, an der y=0 landet
+            val offset = loc[1] - controlParams.y
+            controlParams.y = when {
+                spaceBelow >= barH + m -> (region.top + region.height).toInt() + m - offset
+                spaceAbove >= barH + m -> (region.top - barH - m).toInt() - offset
+                else -> controlParams.y
+            }
+            try { wm.updateViewLayout(controlBar, controlParams) } catch (_: Exception) {}
+        }
+    }
     fun setLive(on: Boolean) {
         if (!::liveButton.isInitialized) return
         liveButton.text = if (on) "❚❚" else "▶"

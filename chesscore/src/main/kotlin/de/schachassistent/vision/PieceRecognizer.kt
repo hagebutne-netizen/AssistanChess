@@ -116,7 +116,12 @@ class SquareFeature(
 }
 
 /** Ergebnis einer Erkennung. pieces: FEN-Buchstabe je Feld, null = leer. */
-data class BoardReading(val pieces: Map<Square, Char?>, val uncertain: Int)
+/**
+ * Ergebnis einer Erkennung. pieces: FEN-Buchstabe je Feld, null = leer.
+ * [unknown]: Felder, die fast ganz von eigenen Zeichnungen (z. B. der Leiste) verdeckt waren
+ * und deshalb nicht gelesen werden konnten.
+ */
+data class BoardReading(val pieces: Map<Square, Char?>, val uncertain: Int, val unknown: Set<Square> = emptySet())
 
 /**
  * Eingelernte Vorlagen je Figur ('.' = leeres Feld). Gelernt wird einmal aus der
@@ -124,7 +129,10 @@ data class BoardReading(val pieces: Map<Square, Char?>, val uncertain: Int)
  */
 class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
 
-    fun classify(f: SquareFeature): Pair<Char, Float> {
+    fun classify(f: SquareFeature): Pair<Char, Float> = scores(f).minBy { it.value }.toPair()
+
+    /** Abstand des Feldes zu jeder Figurenart (kleiner = ähnlicher). */
+    fun scores(f: SquareFeature): Map<Char, Float> {
         // Je Figur die beste Vorlage (ohne Verschiebung) ...
         val candidates = samples.map { (piece, list) ->
             var bt = list[0]; var bd = Float.MAX_VALUE
@@ -140,28 +148,63 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
             }
             Triple(piece to t, bd, bdx to bdy)
         }.sortedBy { it.second }
+        val result = HashMap<Char, Float>()
+        for ((pt, d, _) in coarse) result[pt.first] = d
         // ... und für die besten drei fein (±1 um die beste Verschiebung)
-        var best = coarse[0].first.first; var bestD = coarse[0].second
         for ((pt, _, shift) in coarse.take(3)) {
             for (dy in -1..1) for (dx in -1..1) {
                 val d = f.shiftedDistance(pt.second, shift.first + dx, shift.second + dy)
-                if (d < bestD) { bestD = d; best = pt.first }
+                if (d < result[pt.first]!!) result[pt.first] = d
             }
         }
-        return best to bestD
+        return result
     }
 
     fun read(board: Img, whiteAtBottom: Boolean, occluded: BooleanArray? = null): BoardReading {
         val feats = SquareFeature.extractAll(board, occluded)
+        val squares = Array(64) { k -> squareAt(k % 8, k / 8, whiteAtBottom) }
+        val unknown = HashSet<Square>()
+        val scores = arrayOfNulls<Map<Char, Float>>(64)
+        val pick = CharArray(64) { '.' }
+        for (k in 0 until 64) {
+            if (feats[k].validCount < SquareFeature.N * SquareFeature.N / 3) { unknown += squares[k]; continue }
+            val sc = scores(feats[k])
+            scores[k] = sc
+            pick[k] = sc.minBy { it.value }.key
+        }
+        // Schachregeln nutzen, um typische Verwechslungen zu korrigieren
+        // (nur wenn alle Felder sichtbar sind, sonst könnte der König einfach verdeckt sein)
+        if (unknown.isEmpty()) {
+            // a) genau ein König je Farbe
+            for (king in charArrayOf('K', 'k')) {
+                val holders = (0 until 64).filter { pick[it] == king }
+                if (holders.isEmpty()) {
+                    // Feld, auf dem der König am wenigsten schlechter passt als die gewählte Figur
+                    val k = (0 until 64).filter { pick[it] != (if (king == 'K') 'k' else 'K') }
+                        .minByOrNull { scores[it]!![king]!! - scores[it]!![pick[it]]!! }
+                    if (k != null) pick[k] = king
+                } else if (holders.size > 1) {
+                    val keep = holders.minBy { scores[it]!![king]!! }
+                    for (k in holders) if (k != keep) pick[k] = secondBest(scores[k]!!, king)
+                }
+            }
+            // b) keine Bauern auf der ersten/letzten Reihe
+            for (k in 0 until 64) if ((pick[k] == 'P' || pick[k] == 'p') && (squares[k].rank == 0 || squares[k].rank == 7)) {
+                pick[k] = secondBest(scores[k]!!, 'P', 'p', 'K', 'k')
+            }
+        }
         val pieces = HashMap<Square, Char?>(64)
         var uncertain = 0
         for (k in 0 until 64) {
-            val (p, d) = classify(feats[k])
-            if (d > UNCERTAIN) uncertain++
-            pieces[squareAt(k % 8, k / 8, whiteAtBottom)] = if (p == '.') null else p
+            if (squares[k] in unknown) { pieces[squares[k]] = null; continue }
+            if (scores[k]!![pick[k]]!! > UNCERTAIN) uncertain++
+            pieces[squares[k]] = if (pick[k] == '.') null else pick[k]
         }
-        return BoardReading(pieces, uncertain)
+        return BoardReading(pieces, uncertain, unknown)
     }
+
+    private fun secondBest(sc: Map<Char, Float>, vararg excluded: Char): Char =
+        sc.filterKeys { it !in excluded }.minByOrNull { it.value }?.key ?: '.'
 
     fun write(out: OutputStream) {
         val o = DataOutputStream(out)
@@ -178,7 +221,7 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
     }
 
     companion object {
-        private const val VERSION = 2
+        private const val VERSION = 3   // 3: alte, evtl. verdeckt gelernte Vorlagen verwerfen
         const val UNCERTAIN = 0.22f
         private const val START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
 
@@ -188,7 +231,7 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
         fun read(input: InputStream): PieceTemplates? = try {
             val i = DataInputStream(input)
             val version = i.readInt()
-            if (version != 1 && version != VERSION) null else {
+            if (version != VERSION) null else {
                 val n = i.readInt()
                 val map = HashMap<Char, MutableList<SquareFeature>>()
                 repeat(n) {
@@ -232,6 +275,8 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
          */
         fun learnFromStart(board: Img, occluded: BooleanArray? = null): Pair<PieceTemplates, Boolean>? {
             val feats = SquareFeature.extractAll(board, occluded)
+            // Nur lernen, wenn jedes Feld gut sichtbar ist (sonst fehlen z. B. König/Dame für immer)
+            if (feats.any { it.validCount < SquareFeature.N * SquareFeature.N * 3 / 4 }) return null
             if (!looksLikeStart(feats)) return null
             val wab = whiteAtBottom(feats)
             val start = parsePlacement(START)
