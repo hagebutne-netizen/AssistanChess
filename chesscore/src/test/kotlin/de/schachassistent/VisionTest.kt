@@ -119,8 +119,39 @@ class VisionTest {
 
     @Test fun toleratesSlightlyOffBoardCrop() {
         val (templates, wab) = PieceTemplates.learnFromStart(boardImg(render(start), 40f, 610f, 1000f))!!
-        val reading = templates.read(boardImg(render(midgame, highlight = listOf("e2", "e4")), 45f, 605f, 996f), wab)
+        val reading = templates.read(boardImg(render(midgame, highlight = listOf("e2", "e4")), 43f, 607f, 997f), wab)
         assertEquals(midgame, placementOf(reading.pieces))
+    }
+
+    /** Eigene Pfeile liegen über dem Brett: mit Verdeckungsmaske trotzdem richtig erkennen. */
+    @Test fun readsThroughOwnArrows() {
+        val (templates, wab) = PieceTemplates.learnFromStart(boardImg(render(start), 40f, 610f, 1000f))!!
+        val base = render(midgame)
+        val bi = BufferedImage(1000, 1000, BufferedImage.TYPE_INT_RGB)
+        bi.setRGB(0, 0, 1000, 1000, boardImg(base, 40f, 610f, 1000f).pixels, 0, 1000)
+        val maskImg = BufferedImage(1000, 1000, BufferedImage.TYPE_BYTE_GRAY)
+        val g = bi.createGraphics(); val gm = maskImg.createGraphics()
+        fun center(sq: String): Pair<Int, Int> { val s = Square.parse(sq); return (s.file * 125 + 62) to ((7 - s.rank) * 125 + 62) }
+        for ((a, b) in listOf("d1" to "h5", "c3" to "e4", "f8" to "b4")) {
+            val (x1, y1) = center(a); val (x2, y2) = center(b)
+            g.color = Color(46, 160, 67, 200); g.stroke = BasicStroke(24f); g.drawLine(x1, y1, x2, y2)
+            gm.color = Color.WHITE; gm.stroke = BasicStroke(36f); gm.drawLine(x1, y1, x2, y2)
+        }
+        val px = IntArray(1000 * 1000); bi.getRGB(0, 0, 1000, 1000, px, 0, 1000)
+        val mpx = IntArray(1000 * 1000); maskImg.getRGB(0, 0, 1000, 1000, mpx, 0, 1000)
+        val occluded = BooleanArray(mpx.size) { (mpx[it] and 0xFF) > 0 }
+        val reading = templates.read(Img(1000, 1000, px), wab, occluded)
+        assertEquals(midgame, placementOf(reading.pieces))
+    }
+
+    @Test fun speed() {
+        val img = render(midgame)
+        val (templates, wab) = PieceTemplates.learnFromStart(boardImg(render(start), 40f, 610f, 1000f))!!
+        BoardDetector.detect(img); templates.read(boardImg(img, 40f, 610f, 1000f), wab) // Aufwärmen
+        var t = System.nanoTime(); BoardDetector.detect(img); val detectMs = (System.nanoTime() - t) / 1_000_000
+        t = System.nanoTime(); templates.read(boardImg(img, 40f, 610f, 1000f), wab); val readMs = (System.nanoTime() - t) / 1_000_000
+        println("Brett finden: $detectMs ms, Stellung lesen: $readMs ms")
+        assertTrue(detectMs < 1500 && readMs < 300)
     }
 
     @Test fun blackAtBottom() {

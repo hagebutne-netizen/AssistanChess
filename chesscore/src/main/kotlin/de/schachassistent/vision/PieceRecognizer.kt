@@ -12,29 +12,53 @@ import kotlin.math.abs
  * Der Feldhintergrund wird pro Feld aus dem Rand geschätzt. Dadurch ist die Erkennung
  * unabhängig von hellen/dunklen Feldern und von farbigen Markierungen (letzter Zug o. ä.).
  */
-class SquareFeature(val mask: BooleanArray, val lum: IntArray) {
-    val fill: Float = mask.count { it } / mask.size.toFloat()
+class SquareFeature(
+    val mask: BooleanArray,
+    val lum: IntArray,
+    /** false = Punkt war verdeckt (eigener Pfeil, Steuerleiste) und zählt nicht. */
+    val valid: BooleanArray = BooleanArray(mask.size) { true },
+) {
+    val validCount: Int = valid.count { it }
+
+    val fill: Float = run {
+        var n = 0
+        for (i in mask.indices) if (valid[i] && mask[i]) n++
+        if (validCount == 0) 0f else n / validCount.toFloat()
+    }
 
     /** Mittlere Helligkeit der Figurenpixel (hell = weiße Figur). */
     val pieceLum: Float = run {
         var s = 0; var n = 0
-        for (i in mask.indices) if (mask[i]) { s += lum[i]; n++ }
+        for (i in mask.indices) if (valid[i] && mask[i]) { s += lum[i]; n++ }
         if (n == 0) 0f else s / n.toFloat()
     }
 
     fun distance(o: SquareFeature): Float = shiftedDistance(o, 0, 0)
 
-    /** Abstand, wenn [o] um (dx,dy) Rasterpunkte verschoben wird (gleicht ungenaue Brettränder aus). */
+    /**
+     * Abstand, wenn [o] um (dx,dy) Rasterpunkte verschoben wird (gleicht ungenaue Brettränder aus).
+     * Verdeckte Punkte werden ausgelassen.
+     */
     fun shiftedDistance(o: SquareFeature, dx: Int, dy: Int): Float {
         var d = 0f
-        for (y in 0 until N) for (x in 0 until N) {
-            val ox = x + dx; val oy = y + dy
-            val i = y * N + x
-            val om = ox in 0 until N && oy in 0 until N && o.mask[oy * N + ox]
-            if (mask[i] != om) d += 1f
-            else if (om) d += abs(lum[i] - o.lum[oy * N + ox]) / 255f * 1.5f
+        var n = 0
+        val om = o.mask; val ol = o.lum; val ov = o.valid
+        for (y in 0 until N) {
+            val oy = y + dy
+            for (x in 0 until N) {
+                val i = y * N + x
+                if (!valid[i]) continue
+                val ox = x + dx
+                val inside = ox in 0 until N && oy in 0 until N
+                val oi = oy * N + ox
+                if (inside && !ov[oi]) continue
+                n++
+                val oMask = inside && om[oi]
+                if (mask[i] != oMask) d += 1f
+                else if (oMask) d += abs(lum[i] - ol[oi]) * (1.5f / 255f)
+            }
         }
-        return d / mask.size
+        return if (n < MIN_VALID) 1f else d / n
     }
 
     /** Kleinster Abstand über Verschiebungen von bis zu ±[range] Rasterpunkten. */
@@ -46,27 +70,34 @@ class SquareFeature(val mask: BooleanArray, val lum: IntArray) {
 
     companion object {
         const val N = 32
+        private const val MIN_VALID = N * N / 4
         private const val BG_THRESHOLD = 48   // Summe |dR|+|dG|+|dB| ab der ein Pixel zur Figur zählt
         private const val INSET = 0.06f
 
-        /** Merkmal des Feldes in Bildschirmspalte [col] / -zeile [row] eines Brettbildes. */
-        fun extract(board: Img, col: Int, row: Int): SquareFeature {
+        /**
+         * Merkmal des Feldes in Bildschirmspalte [col] / -zeile [row] eines Brettbildes.
+         * [occluded] (optional, gleiche Größe wie [board]) markiert verdeckte Pixel.
+         */
+        fun extract(board: Img, col: Int, row: Int, occluded: BooleanArray? = null): SquareFeature {
             val cw = board.width / 8f; val ch = board.height / 8f
             val x0 = col * cw + cw * INSET; val y0 = row * ch + ch * INSET
             val sx = cw * (1 - 2 * INSET) / N; val sy = ch * (1 - 2 * INSET) / N
             val px = IntArray(N * N)
+            val valid = BooleanArray(N * N)
             for (j in 0 until N) for (i in 0 until N) {
                 val x = (x0 + (i + 0.5f) * sx).toInt().coerceIn(0, board.width - 1)
                 val y = (y0 + (j + 0.5f) * sy).toInt().coerceIn(0, board.height - 1)
                 px[j * N + i] = board[x, y]
+                valid[j * N + i] = occluded == null || !occluded[y * board.width + x]
             }
-            // Hintergrund = Median der Randpixel (2 Pixel breit)
+            // Hintergrund = Median der sichtbaren Randpixel (2 Pixel breit)
             val rs = ArrayList<Int>(); val gs = ArrayList<Int>(); val bs = ArrayList<Int>()
             for (j in 0 until N) for (i in 0 until N) {
-                if (i < 2 || j < 2 || i >= N - 2 || j >= N - 2) {
+                if ((i < 2 || j < 2 || i >= N - 2 || j >= N - 2) && valid[j * N + i]) {
                     val c = px[j * N + i]; rs += Img.r(c); gs += Img.g(c); bs += Img.b(c)
                 }
             }
+            if (rs.isEmpty()) return SquareFeature(BooleanArray(N * N), IntArray(N * N), BooleanArray(N * N))
             rs.sort(); gs.sort(); bs.sort()
             val br = rs[rs.size / 2]; val bg = gs[gs.size / 2]; val bb = bs[bs.size / 2]
             val mask = BooleanArray(N * N)
@@ -76,11 +107,11 @@ class SquareFeature(val mask: BooleanArray, val lum: IntArray) {
                 mask[k] = abs(Img.r(c) - br) + abs(Img.g(c) - bg) + abs(Img.b(c) - bb) > BG_THRESHOLD
                 lum[k] = Img.lum(c)
             }
-            return SquareFeature(mask, lum)
+            return SquareFeature(mask, lum, valid)
         }
 
-        fun extractAll(board: Img): Array<SquareFeature> =
-            Array(64) { k -> extract(board, k % 8, k / 8) }   // Index = row * 8 + col (Bildschirm)
+        fun extractAll(board: Img, occluded: BooleanArray? = null): Array<SquareFeature> =
+            Array(64) { k -> extract(board, k % 8, k / 8, occluded) }   // Index = row * 8 + col (Bildschirm)
     }
 }
 
@@ -94,19 +125,34 @@ data class BoardReading(val pieces: Map<Square, Char?>, val uncertain: Int)
 class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
 
     fun classify(f: SquareFeature): Pair<Char, Float> {
-        // 1) schnell ohne Verschiebung die besten Kandidaten je Figur bestimmen
-        val candidates = samples.map { (piece, list) -> piece to list.minBy { f.distance(it) } }
-        // 2) für jede Figur kleine Verschiebungen zulassen
-        var best = '.'; var bestD = Float.MAX_VALUE
-        for ((piece, t) in candidates) {
-            val d = f.bestDistance(t)
-            if (d < bestD) { bestD = d; best = piece }
+        // Je Figur die beste Vorlage (ohne Verschiebung) ...
+        val candidates = samples.map { (piece, list) ->
+            var bt = list[0]; var bd = Float.MAX_VALUE
+            for (t in list) { val d = f.distance(t); if (d < bd) { bd = d; bt = t } }
+            piece to bt
+        }
+        // ... dann grob verschoben (Raster 2) vergleichen, weil ein paar Pixel Versatz die Reihenfolge ändern können
+        val coarse = candidates.map { (piece, t) ->
+            var bd = Float.MAX_VALUE; var bdx = 0; var bdy = 0
+            for (dy in -2..2 step 2) for (dx in -2..2 step 2) {
+                val d = f.shiftedDistance(t, dx, dy)
+                if (d < bd) { bd = d; bdx = dx; bdy = dy }
+            }
+            Triple(piece to t, bd, bdx to bdy)
+        }.sortedBy { it.second }
+        // ... und für die besten drei fein (±1 um die beste Verschiebung)
+        var best = coarse[0].first.first; var bestD = coarse[0].second
+        for ((pt, _, shift) in coarse.take(3)) {
+            for (dy in -1..1) for (dx in -1..1) {
+                val d = f.shiftedDistance(pt.second, shift.first + dx, shift.second + dy)
+                if (d < bestD) { bestD = d; best = pt.first }
+            }
         }
         return best to bestD
     }
 
-    fun read(board: Img, whiteAtBottom: Boolean): BoardReading {
-        val feats = SquareFeature.extractAll(board)
+    fun read(board: Img, whiteAtBottom: Boolean, occluded: BooleanArray? = null): BoardReading {
+        val feats = SquareFeature.extractAll(board, occluded)
         val pieces = HashMap<Square, Char?>(64)
         var uncertain = 0
         for (k in 0 until 64) {
@@ -123,13 +169,16 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
         o.writeInt(samples.values.sumOf { it.size })
         for ((piece, list) in samples) for (f in list) {
             o.writeChar(piece.code)
-            for (i in f.mask.indices) { o.writeBoolean(f.mask[i]); o.writeByte(f.lum[i]) }
+            for (i in f.mask.indices) {
+                o.writeByte((if (f.mask[i]) 1 else 0) or (if (f.valid[i]) 2 else 0))
+                o.writeByte(f.lum[i])
+            }
         }
         o.flush()
     }
 
     companion object {
-        private const val VERSION = 1
+        private const val VERSION = 2
         const val UNCERTAIN = 0.22f
         private const val START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
 
@@ -138,15 +187,22 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
 
         fun read(input: InputStream): PieceTemplates? = try {
             val i = DataInputStream(input)
-            if (i.readInt() != VERSION) null else {
+            val version = i.readInt()
+            if (version != 1 && version != VERSION) null else {
                 val n = i.readInt()
                 val map = HashMap<Char, MutableList<SquareFeature>>()
                 repeat(n) {
                     val piece = i.readChar()
                     val m = BooleanArray(SquareFeature.N * SquareFeature.N)
                     val l = IntArray(m.size)
-                    for (k in m.indices) { m[k] = i.readBoolean(); l[k] = i.readUnsignedByte() }
-                    map.getOrPut(piece) { ArrayList() } += SquareFeature(m, l)
+                    val v = BooleanArray(m.size) { true }
+                    for (k in m.indices) {
+                        val flags = i.readUnsignedByte()
+                        m[k] = flags and 1 != 0
+                        if (version >= 2) v[k] = flags and 2 != 0
+                        l[k] = i.readUnsignedByte()
+                    }
+                    map.getOrPut(piece) { ArrayList() } += SquareFeature(m, l, v)
                 }
                 PieceTemplates(map)
             }
@@ -174,8 +230,8 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
          * Lernt alle Figuren aus einem Brettbild in Grundstellung.
          * @return Vorlagen + erkannte Ausrichtung, oder null wenn es keine Grundstellung ist.
          */
-        fun learnFromStart(board: Img): Pair<PieceTemplates, Boolean>? {
-            val feats = SquareFeature.extractAll(board)
+        fun learnFromStart(board: Img, occluded: BooleanArray? = null): Pair<PieceTemplates, Boolean>? {
+            val feats = SquareFeature.extractAll(board, occluded)
             if (!looksLikeStart(feats)) return null
             val wab = whiteAtBottom(feats)
             val start = parsePlacement(START)

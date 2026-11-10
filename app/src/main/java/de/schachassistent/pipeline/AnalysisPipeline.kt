@@ -1,32 +1,34 @@
 package de.schachassistent.pipeline
 
-import android.graphics.Color
 import de.schachassistent.board.BoardCalibrationStore
 import de.schachassistent.board.BoardRegion
 import de.schachassistent.capture.ScreenCapturer
 import de.schachassistent.engine.ChessEngine
 import de.schachassistent.engine.EngineFactory
+import de.schachassistent.engine.EngineUpdate
 import de.schachassistent.overlay.Arrow
+import de.schachassistent.overlay.ArrowStyle
 import de.schachassistent.overlay.OverlayController
+import de.schachassistent.overlay.Turn
 import de.schachassistent.recognition.BoardVision
 import de.schachassistent.recognition.BroadcastFenSource
 import de.schachassistent.recognition.Fen
 import de.schachassistent.vision.PositionTracker
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Steuert alles Automatische:
- *  - Brett finden (Auto), Figuren aus der Grundstellung einlernen
- *  - Live-Modus: Brett beobachten, bei jeder Änderung Stellung lesen, Stockfish fragen, Pfeil zeichnen
- *  - Einzel-Analyse auf Knopfdruck
- * Alle Overlay-Aufrufe passieren im Main-Thread (Scope des Services).
+ *  - Brett finden, Figuren aus der Grundstellung einlernen
+ *  - Live: Brett beobachten; bei jeder Änderung Pfeile sofort weg, Stellung lesen,
+ *    erkennen wer dran ist, auf deinem Zug Stockfish fragen und den Pfeil live verbessern
+ * Läuft komplett im Main-Thread-Scope des Services; Schweres passiert in Dispatchers.Default/IO.
  */
 class AnalysisPipeline(
     private val scope: CoroutineScope,
@@ -37,15 +39,21 @@ class AnalysisPipeline(
     private val vision: BoardVision,
     private val engineFactory: EngineFactory,
 ) {
-    private val mutex = Mutex()
     private val tracker = PositionTracker()
     private var engine: ChessEngine? = null
     private var liveJob: Job? = null
+    private var searchJob: Job? = null
     private var lastFen: String? = null
+    @Volatile private var forceRead = false
+
+    init {
+        // Stockfish sofort im Hintergrund starten -> erster Zug ohne Wartezeit
+        scope.launch { engine = engineFactory.create()?.also { it.warmUp() } }
+    }
 
     val isLive get() = liveJob?.isActive == true
 
-    // ------------------------------------------------------------------ öffentliche Aktionen
+    // ------------------------------------------------------------------ Aktionen der Leiste
 
     fun startLive() {
         if (isLive) return
@@ -56,42 +64,57 @@ class AnalysisPipeline(
     fun stopLive() {
         liveJob?.cancel(); liveJob = null
         overlay.setLive(false)
-        overlay.setStatus("Live aus")
+        overlay.setStatus("Pausiert")
     }
 
     fun toggleLive() = if (isLive) stopLive() else startLive()
 
-    /** "Auto": Brett suchen und – falls Grundstellung – Figuren (neu) einlernen. */
+    /** Brett neu suchen und – falls Grundstellung – Figuren neu einlernen. */
     fun autoSetup() {
         scope.launch {
-            mutex.withLock {
-                overlay.setStatus("Suche Schachbrett …")
-                val region = withArrowsHidden { detectBoard() }
-                if (region == null) {
-                    overlay.setStatus("Kein Brett gefunden. Spiel öffnen oder mit \"Brett\" markieren."); return@withLock
-                }
-                val learned = withArrowsHidden { learnIfStart(region) }
-                overlay.setStatus(
-                    when {
-                        learned -> "Brett + Figuren eingelernt ✓"
-                        vision.hasTemplates -> "Brett gefunden ✓"
-                        else -> "Brett gefunden. Jetzt einmal die Grundstellung zeigen."
-                    }
-                )
+            overlay.setStatus("Suche Schachbrett …")
+            val region = detectBoard()
+            if (region == null) {
+                overlay.setStatus("Kein Brett gefunden. Spiel öffnen oder ⌖ zum Markieren."); return@launch
             }
+            val learned = learnIfStart(region)
+            overlay.setStatus(
+                when {
+                    learned -> "Brett + Figuren eingelernt ✓"
+                    vision.hasTemplates -> "Brett gefunden ✓"
+                    else -> "Brett gefunden. Starte eine neue Partie zum Einlernen."
+                }
+            )
+            forceRead = true
             if (!isLive) startLive()
         }
     }
 
+    /** Sofort neu lesen und rechnen. */
     fun analyzeOnce() {
-        scope.launch { mutex.withLock { analyze(force = true) } }
+        forceRead = true
+        if (!isLive) scope.launch { readAndRespond() }
     }
 
-    /** Nach manueller Markierung oder neuem FEN: Verlauf vergessen. */
-    fun onRegionChanged() { tracker.reset(); lastFen = null }
+    /** Antippen der Zug-Anzeige: wer am Zug ist von Hand umschalten. */
+    fun toggleTurn() {
+        val fen = lastFen ?: return
+        val parts = fen.split(' ').toMutableList()
+        val newSide = if (parts[1] == "w") 'b' else 'w'
+        parts[1] = newSide.toString()
+        tracker.forceSide(newSide)
+        respond(parts.joinToString(" "))
+    }
+
+    /** Stellung kam direkt vom Spiel. */
+    fun onDirectFen() { directFen.latestFen?.let { respond(it) } }
+
+    fun onRegionChanged() { tracker.reset(); lastFen = null; forceRead = true }
 
     fun close() {
         liveJob?.cancel()
+        searchJob?.cancel()
+        engine?.stopSearch()
         engine?.close()
         engine = null
     }
@@ -100,92 +123,132 @@ class AnalysisPipeline(
 
     private suspend fun CoroutineScope.liveLoop() {
         var reference: FloatArray? = null
+        var lastFrame = -1L
         var failures = 0
+        var nextSearch = 0L
         while (isActive) {
-            if (overlay.isSelecting) { delay(500); continue }
-
-            // Direkte FEN-Übergabe aktiv -> keine Bilderkennung nötig
-            if (directFen.latestFen != null) { delay(1000); continue }
+            delay(POLL_MS)
+            if (overlay.isSelecting) continue
+            if (directFen.latestFen != null) continue   // Spiel liefert die Stellung selbst
 
             var region = store.load()
             if (region == null) {
+                val now = System.currentTimeMillis()
+                if (now < nextSearch) continue
+                nextSearch = now + 1500
                 overlay.setStatus("Suche Schachbrett …")
-                region = mutex.withLock { withArrowsHidden { detectBoard() } }
-                if (region == null) { delay(1500); continue }
+                region = detectBoard() ?: continue
                 reference = null
             }
             if (!vision.hasTemplates) {
-                overlay.setStatus("Zeig einmal die Grundstellung zum Einlernen …")
-                if (!mutex.withLock { withArrowsHidden { learnIfStart(region) } }) { delay(1000); continue }
+                val now = System.currentTimeMillis()
+                if (now < nextSearch) continue
+                nextSearch = now + 1000
+                overlay.setStatus("Starte eine neue Partie – ich lerne die Figuren einmal ein.")
+                if (!learnIfStart(region)) continue
                 reference = null
             }
 
-            val sig = capturer.signature(region.left, region.top, region.width, region.height)
+            val frame = capturer.frameNumber()
+            if (frame == lastFrame && reference != null && !forceRead) continue
+            lastFrame = frame
+
+            val sig = signature(region) ?: continue
             val ref = reference
-            if (sig != null && (ref == null || difference(sig, ref) > CHANGE_THRESHOLD)) {
-                // Warten, bis Animationen fertig sind (Bild zweimal hintereinander gleich)
-                var prev: FloatArray = sig
-                for (i in 0 until 12) {
-                    delay(200)
-                    val s = capturer.signature(region.left, region.top, region.width, region.height) ?: break
-                    if (difference(s, prev) < CHANGE_THRESHOLD) break
-                    prev = s
-                }
-                val ok = mutex.withLock { analyze(force = false) }
-                failures = if (ok) 0 else failures + 1
-                if (failures >= 6) {  // Brett verschoben? Neu suchen.
-                    failures = 0
-                    mutex.withLock { withArrowsHidden { detectBoard() } }
-                }
-                capturer.awaitNewFrame(400)  // Pfeile sind gezeichnet -> neuer Referenzzustand
-                reference = capturer.signature(region.left, region.top, region.width, region.height)
+            if (ref != null && !forceRead && !changed(sig, ref)) continue
+
+            if (ref != null) {
+                // Es hat sich etwas bewegt: alter Pfeil sofort weg
+                engine?.stopSearch()
+                overlay.clearArrows()
+                overlay.setStatus("Zug erkannt …")
             }
-            delay(350)
+            // Warten, bis Animationen fertig sind (zweimal hintereinander gleiches Bild)
+            var prev = sig
+            for (i in 0 until 15) {
+                delay(STABLE_MS)
+                val s = signature(region) ?: break
+                if (!changed(s, prev)) break
+                prev = s
+            }
+            forceRead = false
+            val ok = readAndRespond()
+            failures = if (ok) 0 else failures + 1
+            if (failures >= 8) {   // Spiel nicht mehr sichtbar oder Brett verschoben
+                failures = 0
+                detectBoard()
+            }
+            reference = signature(store.load() ?: region)
         }
     }
 
     // ------------------------------------------------------------------ Bausteine
 
-    /** @return true, wenn eine Stellung gelesen wurde (auch wenn unverändert). */
-    private suspend fun analyze(force: Boolean): Boolean {
-        val region = store.load() ?: run { overlay.setStatus("Bitte zuerst \"Auto\" oder \"Brett\""); return false }
-
-        val fen: String = directFen.latestFen ?: run {
-            if (!vision.hasTemplates && !withArrowsHidden { learnIfStart(region) }) {
-                overlay.setStatus("Zeig einmal die Grundstellung, dann \"Auto\""); return false
-            }
-            val current = store.load() ?: region
-            val reading = withArrowsHidden { vision.read(current) } ?: return false
-            if (reading.uncertain > MAX_UNCERTAIN) {
-                overlay.setStatus("Erkennung unsicher (${reading.uncertain} Felder)"); return false
-            }
-            val defaultSide = if (current.whiteAtBottom) 'w' else 'b'
-            val changed = tracker.update(reading.pieces, defaultSide)
-            val side = tracker.sideToMove ?: defaultSide
-            val f = Fen.build(reading.pieces, side) ?: run {
-                overlay.setStatus("Stellung ungültig (Könige?)"); return false
-            }
-            if (!changed && !force && f == lastFen) return true
-            f
+    /** Liest die Stellung und reagiert. @return false, wenn kein Brett lesbar war. */
+    private suspend fun readAndRespond(): Boolean {
+        val region = store.load() ?: return false
+        if (!vision.hasTemplates) return false
+        val reading = vision.read(region, overlay.occlusionMask(region))
+        if (reading == null || reading.uncertain > MAX_UNCERTAIN) {
+            overlay.clearArrows(); overlay.setTurn(Turn.UNKNOWN); overlay.setEval("")
+            overlay.setStatus("Kein Brett erkannt")
+            return false
         }
-        lastFen = fen
-
-        val eng = engine ?: engineFactory.create().also { engine = it }
-        if (eng == null) { overlay.setStatus("Stockfish fehlt"); return false }
-
-        overlay.setStatus("Rechne …")
-        val move = eng.bestMove(fen, movetimeMs = MOVETIME_MS)
-        val sideToMove = fen.split(' ').getOrNull(1)?.firstOrNull() ?: 'w'
-        val mySide = if ((store.load() ?: region).whiteAtBottom) 'w' else 'b'
-        if (move == null) {
-            overlay.clearArrows(); overlay.setStatus("Kein Zug möglich (Matt/Patt)")
-        } else {
-            val mine = sideToMove == mySide
-            overlay.showArrows(listOf(Arrow(move, if (mine) MY_COLOR else OPPONENT_COLOR)))
-            overlay.setStatus(if (mine) "Dein bester Zug: $move" else "Gegner droht: $move")
+        val mySide = mySide(region)
+        tracker.update(reading.pieces, mySide)
+        val side = tracker.sideToMove ?: mySide
+        val fen = Fen.build(reading.pieces, side) ?: run {
+            overlay.clearArrows(); overlay.setStatus("Stellung unklar (Könige?)"); return false
         }
+        if (fen != lastFen || overlay.currentArrows.isEmpty()) respond(fen)
         return true
     }
+
+    /** Zeigt Zug-Anzeige und startet Stockfish. Pfeil nur, wenn du dran bist. */
+    private fun respond(fen: String) {
+        lastFen = fen
+        val region = store.load()
+        val mySide = if (region != null) mySide(region) else 'w'
+        val side = fen.split(' ')[1][0]
+        val mine = side == mySide
+        overlay.setTurn(if (mine) Turn.MINE else Turn.OPPONENT)
+        if (!mine) overlay.clearArrows()
+
+        searchJob?.cancel()
+        engine?.stopSearch()
+        searchJob = scope.launch {
+            val eng = engine ?: engineFactory.create()?.also { engine = it }
+            if (eng == null) { overlay.setStatus("Stockfish fehlt"); return@launch }
+            overlay.setStatus(if (mine) "Rechne …" else "Gegner ist am Zug")
+            val result = eng.analyze(fen, if (mine) MY_MOVETIME_MS else OPP_MOVETIME_MS) { u ->
+                scope.launch(Dispatchers.Main) { if (lastFen == fen) show(u, mine, side, mySide) }
+            }
+            if (lastFen != fen) return@launch
+            if (result == null) {
+                overlay.clearArrows(); overlay.setEval("")
+                overlay.setStatus("Partie vorbei (Matt/Patt)")
+            } else {
+                show(result, mine, side, mySide)
+                overlay.setStatus(if (mine) "Bester Zug ${result.move} · Tiefe ${result.depth}" else "Gegner ist am Zug")
+            }
+        }
+    }
+
+    private fun show(u: EngineUpdate, mine: Boolean, side: Char, mySide: Char) {
+        if (mine) overlay.showArrows(listOf(Arrow(u.move, ArrowStyle.MINE)))
+        overlay.setEval(formatEval(u, side == mySide))
+    }
+
+    /** Bewertung immer aus deiner Sicht. */
+    private fun formatEval(u: EngineUpdate, sideIsMine: Boolean): String {
+        val sign = if (sideIsMine) 1 else -1
+        u.mateIn?.let { m -> val v = m * sign; return if (v > 0) "M$v" else "-M${-v}" }
+        val cp = (u.scoreCp ?: return "") * sign
+        val pawns = (cp / 10.0).roundToInt() / 10.0
+        return if (pawns > 0) "+$pawns" else "$pawns"
+    }
+
+    private fun mySide(region: BoardRegion) = if (region.whiteAtBottom) 'w' else 'b'
 
     private suspend fun detectBoard(): BoardRegion? {
         val r = vision.detectBoard() ?: return null
@@ -198,7 +261,7 @@ class AnalysisPipeline(
     }
 
     private suspend fun learnIfStart(region: BoardRegion): Boolean {
-        val whiteAtBottom = vision.learn(region) ?: return false
+        val whiteAtBottom = vision.learn(region, overlay.occlusionMask(region)) ?: return false
         val updated = region.copy(whiteAtBottom = whiteAtBottom)
         store.save(updated)
         overlay.setRegion(updated)
@@ -206,31 +269,29 @@ class AnalysisPipeline(
         return true
     }
 
-    /** Pfeile kurz ausblenden, damit sie nicht im Screenshot landen. */
-    private suspend fun <T> withArrowsHidden(block: suspend () -> T): T {
-        val saved = overlay.currentArrows
-        if (saved.isNotEmpty()) {
-            overlay.clearArrows()
-            capturer.awaitNewFrame(400)
-        }
-        try {
-            return block()
-        } finally {
-            if (overlay.currentArrows.isEmpty()) overlay.showArrows(saved)
-        }
+    private fun signature(region: BoardRegion): FloatArray? {
+        val w = region.width.roundToInt(); val h = region.height.roundToInt()
+        return capturer.signature(region.left.roundToInt().toFloat(), region.top.roundToInt().toFloat(), w, h, overlay.occlusionMask(region))
     }
 
-    private fun difference(a: FloatArray, b: FloatArray): Float {
-        var s = 0f
-        for (i in a.indices) s += abs(a[i] - b[i])
-        return s / a.size
+    /** Hat sich das Brett verändert? Zählt deutlich veränderte Messpunkte (eigene Zeichnungen ausgenommen). */
+    private fun changed(a: FloatArray, b: FloatArray): Boolean {
+        var count = 0
+        for (i in a.indices) {
+            val x = a[i]; val y = b[i]
+            if (x.isNaN() || y.isNaN()) continue
+            if (abs(x - y) > POINT_DELTA) count++
+        }
+        return count >= MIN_CHANGED_POINTS
     }
 
     private companion object {
-        const val CHANGE_THRESHOLD = 3f
+        const val POLL_MS = 120L
+        const val STABLE_MS = 120L
+        const val POINT_DELTA = 30f
+        const val MIN_CHANGED_POINTS = 4
         const val MAX_UNCERTAIN = 3
-        const val MOVETIME_MS = 800L
-        val MY_COLOR = Color.argb(220, 46, 160, 67)
-        val OPPONENT_COLOR = Color.argb(200, 30, 120, 230)
+        const val MY_MOVETIME_MS = 1500L
+        const val OPP_MOVETIME_MS = 700L
     }
 }

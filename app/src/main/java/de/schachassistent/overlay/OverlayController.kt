@@ -2,10 +2,15 @@ package de.schachassistent.overlay
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -16,11 +21,16 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import de.schachassistent.board.BoardCalibrationStore
 import de.schachassistent.board.BoardRegion
+import java.nio.ByteBuffer
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+enum class Turn { MINE, OPPONENT, UNKNOWN }
 
 /**
  * Verwaltet alle Overlay-Fenster (nur vom Main-Thread aufrufen):
  *  1. [ArrowOverlayView]  – Vollbild, nicht berührbar: Raster + Pfeile
- *  2. Steuerleiste        – klein, verschiebbar: Brett / Raster / Analyse / Beenden
+ *  2. Steuerleiste        – kompakt, verschiebbar, mit Zug-Anzeige und Bewertung
  *  3. Brett-Markierung    – Vollbild, berührbar, nur während des Markierens
  */
 class OverlayController(
@@ -31,6 +41,7 @@ class OverlayController(
     var onAuto: () -> Unit = {}
     var onToggleLive: () -> Unit = {}
     var onRegionChanged: () -> Unit = {}
+    var onToggleTurn: () -> Unit = {}
     var onClose: () -> Unit = {}
 
     /** true, solange der Nutzer das Brett von Hand markiert. */
@@ -41,10 +52,17 @@ class OverlayController(
     private val density = context.resources.displayMetrics.density
 
     private val arrowView = ArrowOverlayView(context)
+    private val maskPainter = ArrowPainter()
+    private val recentlyRemoved = ArrayList<Pair<Long, Arrow>>()
+
     private lateinit var controlBar: LinearLayout
     private lateinit var controlParams: WindowManager.LayoutParams
+    private lateinit var tools: LinearLayout
     private lateinit var statusText: TextView
+    private lateinit var turnChip: TextView
+    private lateinit var evalText: TextView
     private lateinit var liveButton: TextView
+    private var compact = false
     private var selectionRoot: View? = null
     private var shown = false
 
@@ -56,6 +74,7 @@ class OverlayController(
         buildControlBar()
         safeAdd(controlBar, controlParams)
         setStatus("Bereit")
+        setTurn(Turn.UNKNOWN)
     }
 
     fun hide() {
@@ -66,11 +85,94 @@ class OverlayController(
         selectionRoot = null
     }
 
-    fun showArrows(arrows: List<Arrow>) { arrowView.arrows = arrows }
-    fun clearArrows() { arrowView.arrows = emptyList() }
+    fun showArrows(arrows: List<Arrow>) {
+        rememberRemoved(arrowView.arrows - arrows.toSet())
+        arrowView.arrows = arrows
+    }
+
+    fun clearArrows() = showArrows(emptyList())
+
     fun setStatus(text: String) { if (::statusText.isInitialized) statusText.text = text }
     fun setRegion(region: BoardRegion) { arrowView.region = region }
-    fun setLive(on: Boolean) { if (::liveButton.isInitialized) liveButton.text = if (on) "● Live" else "○ Live" }
+    fun setLive(on: Boolean) {
+        if (!::liveButton.isInitialized) return
+        liveButton.text = if (on) "❚❚" else "▶"
+        (liveButton.background as GradientDrawable).setColor(if (on) ACCENT_DIM else BUTTON_BG)
+    }
+
+    fun setTurn(turn: Turn) {
+        if (!::turnChip.isInitialized) return
+        val (label, color) = when (turn) {
+            Turn.MINE -> "DU BIST DRAN" to ACCENT
+            Turn.OPPONENT -> "GEGNER IST DRAN" to Color.rgb(90, 98, 112)
+            Turn.UNKNOWN -> "WARTE …" to Color.rgb(60, 64, 72)
+        }
+        turnChip.text = label
+        (turnChip.background as GradientDrawable).setColor(color)
+    }
+
+    /** Bewertung aus deiner Sicht, z. B. "+1.3" oder "M3". Leer = ausblenden. */
+    fun setEval(text: String) {
+        if (!::evalText.isInitialized) return
+        evalText.text = text
+        evalText.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * Pixelmaske (Größe des Bretts) aller eigenen Zeichnungen, die gerade auf dem Brett
+     * liegen oder eben noch lagen: Pfeile, Raster, Steuerleiste. Diese Pixel werden bei
+     * der Erkennung ignoriert. So muss nichts ausgeblendet werden und nichts flackert.
+     */
+    fun occlusionMask(region: BoardRegion): BooleanArray {
+        val now0 = SystemClock.uptimeMillis()
+        recentlyRemoved.removeAll { now0 - it.first > RECENT_MS }
+        val barRect = if (::controlBar.isInitialized && controlBar.isAttachedToWindow && controlBar.visibility == View.VISIBLE) {
+            val l = IntArray(2); controlBar.getLocationOnScreen(l); listOf(l[0], l[1], controlBar.width, controlBar.height)
+        } else emptyList()
+        val key = listOf(region, arrowView.arrows, arrowView.showGrid, barRect)
+        val cached = cachedMask
+        if (cached != null && recentlyRemoved.isEmpty() && key == cachedKey) return cached
+        val mask = buildMask(region)
+        cachedKey = if (recentlyRemoved.isEmpty()) key else null
+        cachedMask = mask
+        return mask
+    }
+
+    private var cachedKey: List<Any>? = null
+    private var cachedMask: BooleanArray? = null
+
+    private fun buildMask(region: BoardRegion): BooleanArray {
+        val w = region.width.roundToInt().coerceAtLeast(1)
+        val h = region.height.roundToInt().coerceAtLeast(1)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val c = Canvas(bmp)
+        c.translate(-region.left.roundToInt().toFloat(), -region.top.roundToInt().toFloat())
+        val now = SystemClock.uptimeMillis()
+        recentlyRemoved.removeAll { now - it.first > RECENT_MS }
+        for (a in arrowView.arrows + recentlyRemoved.map { it.second }) maskPainter.draw(c, region, a, maskMode = true)
+        val p = Paint().apply { color = Color.BLACK; strokeWidth = 4 * density }
+        if (arrowView.showGrid) ArrowOverlayView.drawGrid(c, region, p)
+        if (::controlBar.isInitialized && controlBar.isAttachedToWindow && controlBar.visibility == View.VISIBLE) {
+            val loc = IntArray(2); controlBar.getLocationOnScreen(loc)
+            val m = 6 * density
+            c.drawRect(loc[0] - m, loc[1] - m, loc[0] + controlBar.width + m, loc[1] + controlBar.height + m, p)
+        }
+        val buf = ByteBuffer.allocate(bmp.rowBytes * h)
+        bmp.copyPixelsToBuffer(buf)
+        bmp.recycle()
+        val bytes = buf.array()
+        val mask = BooleanArray(w * h)
+        for (y in 0 until h) {
+            val row = y * bmp.rowBytes
+            for (x in 0 until w) mask[y * w + x] = bytes[row + x].toInt() != 0
+        }
+        return mask
+    }
+
+    private fun rememberRemoved(removed: Collection<Arrow>) {
+        val now = SystemClock.uptimeMillis()
+        removed.forEach { recentlyRemoved += now to it }
+    }
 
     // ---------------------------------------------------------------- Brett markieren
 
@@ -84,26 +186,26 @@ class OverlayController(
         val root = FrameLayout(context)
         root.addView(selView, FrameLayout.LayoutParams(-1, -1))
 
-        val orientationBtn = barButton(if (selView.whiteAtBottom) "Weiß unten" else "Schwarz unten") {}
+        val orientationBtn = textButton(if (selView.whiteAtBottom) "Weiß unten" else "Schwarz unten") {}
         orientationBtn.setOnClickListener {
             selView.whiteAtBottom = !selView.whiteAtBottom
             orientationBtn.text = if (selView.whiteAtBottom) "Weiß unten" else "Schwarz unten"
         }
         val buttons = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = pill()
-            val p = dp(6); setPadding(p, p, p, p)
+            background = panel()
+            val p = dp(8); setPadding(p, p, p, p)
             addView(orientationBtn)
-            addView(barButton("Abbrechen") { endBoardSelection(null) })
-            addView(barButton("Übernehmen") { endBoardSelection(selView.currentRegion()) })
+            addView(textButton("Abbrechen") { endBoardSelection(null) })
+            addView(textButton("Übernehmen", ACCENT) { endBoardSelection(selView.currentRegion()) })
         }
         root.addView(buttons, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
             bottomMargin = dp(72)
         })
         val hint = TextView(context).apply {
             text = "Quadrat genau auf die Brettkanten ziehen.\nEcken ziehen = Größe, Mitte ziehen = verschieben."
-            setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = pill()
-            val p = dp(10); setPadding(p, p, p, p)
+            setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = panel()
+            val p = dp(12); setPadding(p, p, p, p)
         }
         root.addView(hint, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
             topMargin = dp(48)
@@ -120,8 +222,7 @@ class OverlayController(
             store.save(region)
             arrowView.region = region
             onRegionChanged()
-            arrowView.showGrid = true   // Raster zur Kontrolle direkt anzeigen
-            setStatus("Brett gespeichert. Raster prüfen, dann \"Analyse\".")
+            setStatus("Brett gespeichert ✓")
         }
         arrowView.visibility = View.VISIBLE
         controlBar.visibility = View.VISIBLE
@@ -129,7 +230,7 @@ class OverlayController(
 
     // ---------------------------------------------------------------- Steuerleiste
 
-    @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+    @SuppressLint("ClickableViewAccessibility")
     private fun buildControlBar() {
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -138,63 +239,109 @@ class OverlayController(
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(12); y = dp(120)
+            x = dp(12); y = dp(96)
         }
 
+        // Griff: ziehen = verschieben, tippen = ein-/ausklappen
         val handle = TextView(context).apply {
-            text = "⠿"; textSize = 22f; setTextColor(Color.WHITE)
-            val p = dp(8); setPadding(p, p, p, p)
+            text = "⠿"; textSize = 20f; setTextColor(Color.argb(170, 255, 255, 255))
+            setPadding(dp(6), dp(4), dp(4), dp(4))
         }
-        // Leiste am Griff verschieben
-        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
+        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f; var moved = false
         handle.setOnTouchListener { _, e ->
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { startX = controlParams.x; startY = controlParams.y; touchX = e.rawX; touchY = e.rawY }
-                MotionEvent.ACTION_MOVE -> {
-                    controlParams.x = startX + (e.rawX - touchX).toInt()
-                    controlParams.y = startY + (e.rawY - touchY).toInt()
-                    try { wm.updateViewLayout(controlBar, controlParams) } catch (_: Exception) {}
+                MotionEvent.ACTION_DOWN -> {
+                    startX = controlParams.x; startY = controlParams.y; touchX = e.rawX; touchY = e.rawY; moved = false
                 }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(e.rawX - touchX) + abs(e.rawY - touchY) > dp(6)) moved = true
+                    if (moved) {
+                        controlParams.x = startX + (e.rawX - touchX).toInt()
+                        controlParams.y = startY + (e.rawY - touchY).toInt()
+                        try { wm.updateViewLayout(controlBar, controlParams) } catch (_: Exception) {}
+                    }
+                }
+                MotionEvent.ACTION_UP -> if (!moved) toggleCompact()
             }
             true
         }
 
-        val row = LinearLayout(context).apply {
+        turnChip = TextView(context).apply {
+            textSize = 11f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.06f
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.DKGRAY) }
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            setOnClickListener { onToggleTurn() }   // falls die Erkennung danebenliegt: antippen = umschalten
+        }
+        evalText = TextView(context).apply {
+            textSize = 15f; setTextColor(Color.WHITE); typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setPadding(dp(10), 0, dp(4), 0)
+            visibility = View.GONE
+        }
+        liveButton = iconButton("▶") { onToggleLive() }
+        tools = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(liveButton)
+            addView(iconButton("⟳") { onAuto() })
+            addView(iconButton("♞") { onAnalyze() })
+            addView(iconButton("⌖") { startBoardSelection() })
+            addView(iconButton("#") { arrowView.showGrid = !arrowView.showGrid })
+            addView(iconButton("✕") { onClose() })
+        }
+        val top = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(handle)
-            liveButton = barButton("○ Live") { onToggleLive() }
-            addView(liveButton)
-            addView(barButton("Auto") { onAuto() })
-            addView(barButton("Zug") { onAnalyze() })
-            addView(barButton("Brett") { startBoardSelection() })
-            addView(barButton("#") { arrowView.showGrid = !arrowView.showGrid })
-            addView(barButton("✕") { onClose() })
+            addView(turnChip)
+            addView(evalText)
         }
         statusText = TextView(context).apply {
-            setTextColor(Color.LTGRAY); textSize = 12f
-            maxWidth = dp(260)
-            val p = dp(6); setPadding(p, 0, p, p)
+            setTextColor(Color.argb(170, 255, 255, 255)); textSize = 11f
+            maxWidth = dp(270); maxLines = 2
+            setPadding(dp(8), dp(2), dp(8), 0)
         }
         controlBar = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = pill()
-            addView(row)
+            background = panel()
+            setPadding(dp(4), dp(6), dp(6), dp(8))
+            addView(top)
+            addView(tools, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
             addView(statusText)
         }
     }
 
-    private fun barButton(label: String, onClick: () -> Unit) = TextView(context).apply {
+    private fun toggleCompact() {
+        compact = !compact
+        tools.visibility = if (compact) View.GONE else View.VISIBLE
+        statusText.visibility = if (compact) View.GONE else View.VISIBLE
+    }
+
+    private fun iconButton(label: String, onClick: () -> Unit) = TextView(context).apply {
         text = label
-        textSize = 14f
+        textSize = 16f
+        gravity = Gravity.CENTER
         setTextColor(Color.WHITE)
-        val h = dp(8); val v = dp(8)
-        setPadding(h, v, h, v)
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(BUTTON_BG) }
+        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(5) }
         setOnClickListener { onClick() }
     }
 
-    private fun pill() = GradientDrawable().apply {
-        setColor(Color.argb(220, 30, 30, 30)); cornerRadius = dp(14).toFloat()
+    private fun textButton(label: String, color: Int = BUTTON_BG, onClick: () -> Unit) = TextView(context).apply {
+        text = label
+        textSize = 14f
+        setTextColor(Color.WHITE)
+        typeface = Typeface.DEFAULT_BOLD
+        background = GradientDrawable().apply { cornerRadius = dp(18).toFloat(); setColor(color) }
+        setPadding(dp(14), dp(9), dp(14), dp(9))
+        layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4); marginEnd = dp(4) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun panel() = GradientDrawable().apply {
+        setColor(Color.argb(235, 18, 20, 26))
+        cornerRadius = dp(20).toFloat()
+        setStroke(dp(1), Color.argb(40, 255, 255, 255))
     }
 
     // ---------------------------------------------------------------- Fenster-Helfer
@@ -229,5 +376,11 @@ class OverlayController(
 
     private fun dp(v: Int) = (v * density).toInt()
 
-    private companion object { const val TAG = "OverlayController" }
+    private companion object {
+        const val TAG = "OverlayController"
+        const val RECENT_MS = 900L
+        val ACCENT = Color.rgb(0, 170, 100)
+        val ACCENT_DIM = Color.argb(140, 0, 170, 100)
+        val BUTTON_BG = Color.argb(38, 255, 255, 255)
+    }
 }

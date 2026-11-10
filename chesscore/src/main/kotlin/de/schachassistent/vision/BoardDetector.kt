@@ -109,46 +109,64 @@ object BoardDetector {
         for (y in 0 until h) for (x in 0 until w) gray[y * w + x] = Img.lum(img[x0 + x, y0 + y])
         val ii = Integral(w, h, gray)
 
+        // Senkrechte Linien hängen nur von x (und Feldgröße) ab, waagerechte nur von y.
+        // Deshalb x und y getrennt optimieren: viel schneller als alle Kombinationen.
         val baseCell = c.cell
         val posRange = max(14, (baseCell * 0.15f).toInt())
+        val cx = c.left - x0; val cy = c.top - y0
         var best = c.copy(score = -1f)
         var cell = baseCell * 0.95f
         while (cell <= baseCell * 1.05f) {
-            var dy = -posRange
-            while (dy <= posRange) {
-                var dx = -posRange
-                while (dx <= posRange) {
-                    val lx = c.left - x0 + dx; val ly = c.top - y0 + dy
-                    if (lx >= 0 && ly >= 0 && lx + cell * 8 <= w && ly + cell * 8 <= h) {
-                        val s = lineScore(ii, lx, ly, cell)
-                        if (s > best.score) best = BoardRect(lx + x0, ly + y0, cell * 8, s)
-                    }
-                    dx++
+            var bx = cx; var bxs = -1f
+            var by = cy; var bys = -1f
+            for (d in -posRange..posRange) {
+                val lx = cx + d
+                if (lx >= 0 && lx + cell * 8 <= w) {
+                    val sv = verticalScore(ii, lx, cy, cell)
+                    if (sv > bxs) { bxs = sv; bx = lx }
                 }
-                dy++
+                val ly = cy + d
+                if (ly >= 0 && ly + cell * 8 <= h) {
+                    val sh = horizontalScore(ii, cx, ly, cell)
+                    if (sh > bys) { bys = sh; by = ly }
+                }
             }
+            if (bxs >= 0 && bys >= 0 && bxs + bys > best.score) best = BoardRect(bx + x0, by + y0, cell * 8, bxs + bys)
             cell += 0.25f
         }
+        if (best.score < 0) return c
         // Für den Aufrufer zählt die Musterqualität, nicht der Linienkontrast
         return best.copy(score = c.score)
     }
 
-    /** Summe der Kontraste beidseits der 7+7 inneren Rasterlinien, nur in den Feldecken. */
-    private fun lineScore(ii: Integral, x: Float, y: Float, cell: Float): Float {
+    /** Kontrast beidseits der 7 inneren senkrechten Linien, nur in den Feldecken (dort stehen selten Figuren). */
+    private fun verticalScore(ii: Integral, x: Float, y: Float, cell: Float): Float {
         val d = max(3, (cell * 0.06f).toInt())
         val b0 = cell * 0.08f; val b1 = cell * 0.28f
         var total = 0f
         for (k in 1 until 8) {
             val lx = (x + k * cell).roundToInt()
+            for (j in 0 until 8) {
+                var ya = (y + j * cell + b0).toInt(); var yb = (y + j * cell + b1).toInt()
+                total += abs(ii.mean(lx - d, ya, lx, yb) - ii.mean(lx, ya, lx + d, yb))
+                ya = (y + j * cell + cell - b1).toInt(); yb = (y + j * cell + cell - b0).toInt()
+                total += abs(ii.mean(lx - d, ya, lx, yb) - ii.mean(lx, ya, lx + d, yb))
+            }
+        }
+        return total
+    }
+
+    private fun horizontalScore(ii: Integral, x: Float, y: Float, cell: Float): Float {
+        val d = max(3, (cell * 0.06f).toInt())
+        val b0 = cell * 0.08f; val b1 = cell * 0.28f
+        var total = 0f
+        for (k in 1 until 8) {
             val ly = (y + k * cell).roundToInt()
             for (j in 0 until 8) {
-                // senkrechte Linie k, oberer und unterer Eckbereich von Zeile j
-                for ((s0, s1) in arrayOf(b0 to b1, cell - b1 to cell - b0)) {
-                    val ya = (y + j * cell + s0).toInt(); val yb = (y + j * cell + s1).toInt()
-                    total += abs(ii.mean(lx - d, ya, lx, yb) - ii.mean(lx, ya, lx + d, yb))
-                    val xa = (x + j * cell + s0).toInt(); val xb = (x + j * cell + s1).toInt()
-                    total += abs(ii.mean(xa, ly - d, xb, ly) - ii.mean(xa, ly, xb, ly + d))
-                }
+                var xa = (x + j * cell + b0).toInt(); var xb = (x + j * cell + b1).toInt()
+                total += abs(ii.mean(xa, ly - d, xb, ly) - ii.mean(xa, ly, xb, ly + d))
+                xa = (x + j * cell + cell - b1).toInt(); xb = (x + j * cell + cell - b0).toInt()
+                total += abs(ii.mean(xa, ly - d, xb, ly) - ii.mean(xa, ly, xb, ly + d))
             }
         }
         return total

@@ -106,16 +106,22 @@ class ScreenCapturer(private val context: Context, private val projection: Media
 
     fun fullImg(): Img? = cropImg(0, 0, width, height)
 
+    /** Zähler, der bei jedem neuen Bild steigt (zum billigen Prüfen "hat sich etwas getan?"). */
+    fun frameNumber(): Long = synchronized(lock) { frameCounter }
+
     /**
-     * Grober Fingerabdruck eines Bereichs (n x n Helligkeitswerte), um Änderungen
-     * am Brett billig zu erkennen, ohne jedes Mal die volle Erkennung laufen zu lassen.
+     * Grober Fingerabdruck des Bretts (n x n Helligkeitswerte), um Änderungen billig zu
+     * erkennen. Punkte unter eigenen Zeichnungen ([occluded], Brettgröße) werden NaN.
      */
-    fun signature(left: Float, top: Float, w: Float, h: Float, n: Int = 24): FloatArray? = synchronized(lock) {
+    fun signature(left: Float, top: Float, w: Int, h: Int, occluded: BooleanArray?, n: Int = 40): FloatArray? = synchronized(lock) {
         val b = buffer ?: return null
         val out = FloatArray(n * n)
         for (j in 0 until n) for (i in 0 until n) {
-            val x = (left + (i + 0.5f) * w / n).toInt().coerceIn(0, width - 1)
-            val y = (top + (j + 0.5f) * h / n).toInt().coerceIn(0, height - 1)
+            val bx = ((i + 0.5f) * w / n).toInt().coerceIn(0, w - 1)
+            val by = ((j + 0.5f) * h / n).toInt().coerceIn(0, h - 1)
+            if (occluded != null && occluded[by * w + bx]) { out[j * n + i] = Float.NaN; continue }
+            val x = (left + bx).toInt().coerceIn(0, width - 1)
+            val y = (top + by).toInt().coerceIn(0, height - 1)
             out[j * n + i] = Img.lum(b.getPixel(x, y)).toFloat()
         }
         out

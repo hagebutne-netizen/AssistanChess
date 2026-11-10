@@ -110,8 +110,9 @@ class AssistantService : LifecycleService() {
         ov.onAuto = { pipe.autoSetup() }
         ov.onToggleLive = { pipe.toggleLive() }
         ov.onRegionChanged = { pipe.onRegionChanged() }
+        ov.onToggleTurn = { pipe.toggleTurn() }
         ov.onClose = { stopSelf() }
-        fen.onNewFen = { pipe.analyzeOnce() } // Spiel schickt neue Stellung -> sofort rechnen
+        fen.onNewFen = { pipe.onDirectFen() } // Spiel schickt neue Stellung -> sofort rechnen
         ov.show()
         pipe.startLive() // Ein Klick: ab jetzt läuft alles automatisch
 

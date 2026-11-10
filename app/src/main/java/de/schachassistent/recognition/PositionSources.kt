@@ -35,18 +35,19 @@ class BoardVision(context: Context, private val capturer: ScreenCapturer) {
     }
 
     /** Lernt aus der aktuellen Grundstellung. @return erkannte Ausrichtung (Weiß unten?) oder null. */
-    suspend fun learn(region: BoardRegion): Boolean? = withContext(Dispatchers.Default) {
+    suspend fun learn(region: BoardRegion, occluded: BooleanArray?): Boolean? = withContext(Dispatchers.Default) {
         val img = boardImg(region) ?: return@withContext null
-        val (t, whiteAtBottom) = PieceTemplates.learnFromStart(img) ?: return@withContext null
+        val (t, whiteAtBottom) = PieceTemplates.learnFromStart(img, occluded.takeIf { it?.size == img.width * img.height })
+            ?: return@withContext null
         templates = t
         try { file.outputStream().buffered().use { t.write(it) } } catch (e: Exception) { Log.w(TAG, "Speichern fehlgeschlagen", e) }
         whiteAtBottom
     }
 
-    suspend fun read(region: BoardRegion): BoardReading? = withContext(Dispatchers.Default) {
+    suspend fun read(region: BoardRegion, occluded: BooleanArray?): BoardReading? = withContext(Dispatchers.Default) {
         val t = templates ?: return@withContext null
         val img = boardImg(region) ?: return@withContext null
-        t.read(img, region.whiteAtBottom)
+        t.read(img, region.whiteAtBottom, occluded.takeIf { it?.size == img.width * img.height })
     }
 
     fun forget() { templates = null; file.delete() }

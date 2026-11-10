@@ -9,6 +9,14 @@
     <!-- Ab Android 13 für die (Pflicht-)Benachrichtigung des Services -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Damit "Mein Spiel wählen" die installierten Apps sehen kann (Android 11+) -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"

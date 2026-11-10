@@ -33,6 +33,9 @@ class PositionTracker {
 
     fun reset() { last = null; sideToMove = null }
 
+    /** Manuelle Korrektur durch den Nutzer. */
+    fun forceSide(side: Char) { sideToMove = side }
+
     private fun isStart(p: Map<Square, Char?>) =
         PieceTemplates.parsePlacement("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR").all { (sq, c) -> p[sq] == c }
 }

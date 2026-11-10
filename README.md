@@ -6,28 +6,26 @@ besten Zug als Pfeil direkt über dem Brett anzeigen.
 ## Öffnen & starten
 1. Android Studio → *Open* → diesen Ordner wählen. Gradle-Sync abwarten.
 2. Samsung per USB (Entwickleroptionen + USB-Debugging an) → ▶ *Run*.
-3. In der App **„Assistent starten“** tippen:
-   - einmalig „Über anderen Apps anzeigen“ erlauben, dann zurück und nochmal tippen
-   - Benachrichtigungen erlauben
-   - im Aufnahme-Dialog **„Gesamten Bildschirm“** wählen (nicht „Einzelne App“)
-4. Die App verschwindet, eine schwebende Leiste erscheint. **Dein Spiel öffnen und eine neue Partie
-   starten** (Grundstellung). Ab da läuft alles automatisch:
-   - das Brett wird automatisch gefunden
-   - die Figuren werden aus der Grundstellung eingelernt (einmalig, wird gespeichert)
-   - nach jedem Zug: Stellung erkennen → Stockfish → Pfeil
-     - **grün** = dein bester Zug, **blau** = bester Zug des Gegners (wenn er dran ist)
-   - wer am Zug ist, wird aus dem letzten Zug abgeleitet; deine Farbe = die Seite unten
+3. Optional: **„Mein Spiel wählen“** – dann öffnet sich dein Spiel nach dem Start automatisch.
+4. **START** tippen. Beim ersten Mal „Über anderen Apps anzeigen“ erlauben. Danach die Bildschirmaufnahme
+   bestätigen (Android 14+ nimmt automatisch den ganzen Bildschirm).
+5. **Neue Partie beginnen.** Ab da läuft alles automatisch:
+   - Brett wird gefunden, Figuren werden einmal aus der Grundstellung eingelernt (gespeichert)
+   - nach jedem Zug verschwindet der Pfeil sofort; die Leiste zeigt **DU BIST DRAN** / **GEGNER IST DRAN**
+   - bist du dran, erscheint sofort ein **grüner Pfeil**, der sich verbessert, während Stockfish weiterrechnet
+   - daneben die Bewertung aus deiner Sicht (z. B. +1.3 oder M3)
+   - Zug-Anzeige falsch? **Antippen** schaltet um.
 
-### Knöpfe der Leiste
+### Leiste
 | Knopf | Funktion |
 |---|---|
-| ⠿ | Leiste verschieben |
-| ● Live / ○ Live | Automatik an/aus |
-| Auto | Brett neu suchen; bei Grundstellung Figuren neu einlernen |
-| Zug | sofort einmal analysieren |
-| Brett | Brett von Hand markieren (falls die Automatik es nicht findet) |
-| # | 8x8-Raster ein/aus (zum Prüfen) |
-| ✕ | alles beenden |
+| ⠿ | ziehen = verschieben, tippen = ein-/ausklappen |
+| ▶ / ❚❚ | Automatik an/aus |
+| ⟳ | Brett neu suchen; bei Grundstellung Figuren neu einlernen |
+| ♞ | sofort neu lesen und rechnen |
+| ⌖ | Brett von Hand markieren (falls die Automatik es nicht findet) |
+| # | 8x8-Raster ein/aus |
+| ✕ | beenden |
 
 ## Aufbau
 ```
@@ -65,8 +63,11 @@ Sobald ein FEN ankommt, wird automatisch analysiert und der beste Zug als grüne
 - **Figuren:** jedes Feld wird auf 32x32 Punkte verkleinert, der Feldhintergrund pro Feld herausgerechnet
   (dadurch egal ob helles/dunkles/markiertes Feld). Verglichen wird mit den Vorlagen aus der Grundstellung.
   Kleine Verschiebungen werden ausgeglichen.
-- **Live:** ein grober Fingerabdruck des Bretts wird ~3x pro Sekunde verglichen. Erst bei einer Änderung
-  (und wenn Animationen fertig sind) läuft die volle Erkennung. Dafür werden die Pfeile kurz ausgeblendet.
+- **Live:** ein grober Fingerabdruck des Bretts (40x40 Punkte) wird bei jedem neuen Bild verglichen. Erst bei
+  einer Änderung (und wenn Animationen fertig sind) läuft die volle Erkennung (~50 ms).
+- **Eigene Pfeile stören nicht:** alles, was die App selbst zeichnet (Pfeile, Leiste, Raster), wird als
+  Maske aus der Erkennung herausgerechnet. Nichts muss ausgeblendet werden, nichts flackert.
+- **Wer ist dran:** ergibt sich aus der Farbe der Figur, die zuletzt gezogen hat.
 - Eigene Spiel-Grafik geändert? In der Grundstellung einfach **Auto** drücken.
 
 ## Bekannte Grenzen
