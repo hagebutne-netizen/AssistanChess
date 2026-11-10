@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Schach-Assistent</string>
+    <string name="start">Assistent starten</string>
+    <string name="stop">Assistent beenden</string>
+    <string name="hint">Ein Klick startet Bildschirmaufnahme und Overlay. Beim Android-Dialog bitte \"Gesamten Bildschirm\" wählen. Danach dein Schachspiel öffnen und über die schwebende Leiste einmal das Brett markieren.</string>
+    <string name="notif_channel">Schach-Assistent aktiv</string>
+    <string name="notif_text">Bildschirmaufnahme läuft. Tippen zum Öffnen.</string>
+    <string name="overlay_needed">Bitte \"Über anderen Apps anzeigen\" für den Schach-Assistenten erlauben und dann erneut starten.</string>
+</resources>
