@@ -42,6 +42,7 @@ class OverlayController(
     var onToggleLive: () -> Unit = {}
     var onRegionChanged: () -> Unit = {}
     var onToggleTurn: () -> Unit = {}
+    var onDiagnose: () -> Unit = {}
     var onClose: () -> Unit = {}
 
     /** true, solange der Nutzer das Brett von Hand markiert. */
@@ -311,7 +312,9 @@ class OverlayController(
             gravity = Gravity.CENTER_VERTICAL
             addView(liveButton)
             addView(iconButton("⟳") { onAuto() })
-            addView(iconButton("♞") { onAnalyze() })
+            addView(iconButton("♞") { onAnalyze() }.apply {
+                setOnLongClickListener { onDiagnose(); true }   // lange drücken = Diagnose-Bild speichern
+            })
             addView(iconButton("⌖") { startBoardSelection() })
             addView(iconButton("#") { arrowView.showGrid = !arrowView.showGrid })
             addView(iconButton("✕") { onClose() })

@@ -24,7 +24,7 @@ class UserBoardTest {
     private fun cell(i: Int) = i * n / 8  // Feldgrenzen im Original
 
     /** Stellung aus den Original-Figuren zusammensetzen (Figuren werden auf andere Felder "kopiert"). */
-    private fun compose(placement: String): BufferedImage {
+    private fun compose(placement: String, whiteAtBottom: Boolean = true): BufferedImage {
         val out = BufferedImage(n, n, BufferedImage.TYPE_INT_RGB)
         val target = PieceTemplates.parsePlacement(placement)
         val start = PieceTemplates.parsePlacement("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
@@ -32,7 +32,7 @@ class UserBoardTest {
         val sourceOf = HashMap<Char, Square>()
         for ((sq, p) in start) if (p != null && p !in sourceOf) sourceOf[p] = sq
         for (row in 0 until 8) for (col in 0 until 8) {
-            val sq = Square(col, 7 - row)
+            val sq = PieceTemplates.squareAt(col, row, whiteAtBottom)
             val bg = bgColor(sq)
             val x0 = cell(col); val y0 = cell(row); val w = cell(col + 1) - x0; val h = cell(row + 1) - y0
             for (y in 0 until h) for (x in 0 until w) out.setRGB(x0 + x, y0 + y, bg)
@@ -129,5 +129,45 @@ class UserBoardTest {
         val board = boardOf(phone(src))
         val occ = BooleanArray(board.width * board.height) { i -> (i / board.width) < board.height / 8 }
         assertEquals(null, PieceTemplates.learnFromStart(board, occ))
+    }
+
+    // ------------------------------------------------------------ Zugverfolgung
+
+    private fun scores(t: PieceTemplates, placement: String, wab: Boolean = true) =
+        t.scoreBoard(boardOf(phone(compose(placement, wab))))
+
+    @Test fun tracksWholeGameWithLegalMoves() {
+        val (t, _) = PieceTemplates.learnFromStart(boardOf(phone(src)))!!
+        val tracker = de.schachassistent.vision.GameTracker()
+        var pos = de.schachassistent.chess.Position.fromFen(de.schachassistent.chess.Position.START_FEN)
+        assertEquals(pos.toFen(), tracker.update(scores(t, pos.toFen().substringBefore(' ')))!!.position.toFen())
+        // Italienisch mit kurzer Rochade, Schlagen, Bauernumwandlung ist nicht dabei – dafür En passant
+        val moves = "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 e1g1 f8c5 d2d4 e5d4 e4e5 d7d5 e5d6"
+        for (uci in moves.split(' ')) {
+            pos = pos.apply(de.schachassistent.board.Move.fromUci(uci)!!)
+            val r = tracker.update(scores(t, pos.toFen().substringBefore(' ')))
+            assertNotNull("kein Ergebnis nach $uci", r)
+            assertEquals("nach $uci", pos.toFen(), r!!.position.toFen())
+        }
+    }
+
+    @Test fun legalMoveCorrectsMisreadSquare() {
+        val (t, _) = PieceTemplates.learnFromStart(boardOf(phone(src)))!!
+        val tracker = de.schachassistent.vision.GameTracker()
+        tracker.update(scores(t, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"))
+        val cells = scores(t, "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR")
+        // Lesefehler simulieren: Feld b1 (Zeile 7, Spalte 1) sieht "wie ein Läufer" aus
+        cells[7 * 8 + 1] = cells[7 * 8 + 1]!!.toMutableMap().apply { this['B'] = 0f }
+        val r = tracker.update(cells)!!
+        assertEquals("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", r.position.toFen())
+    }
+
+    @Test fun detectsFlippedBoardMidGame() {
+        val (t, _) = PieceTemplates.learnFromStart(boardOf(phone(src)))!!
+        val tracker = de.schachassistent.vision.GameTracker()
+        val placement = "r1bq1rk1/pp2bppp/2n1pn2/3p4/2PP4/2N1PN2/PP1B1PPP/R2QKB1R"
+        val r = tracker.update(scores(t, placement, wab = false), defaultSideToMove = false)!!
+        assertEquals(false, r.whiteAtBottom)
+        assertEquals(placement, r.position.toFen().substringBefore(' '))
     }
 }

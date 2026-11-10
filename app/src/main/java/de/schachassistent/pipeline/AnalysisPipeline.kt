@@ -2,7 +2,6 @@ package de.schachassistent.pipeline
 
 import de.schachassistent.board.BoardCalibrationStore
 import de.schachassistent.board.BoardRegion
-import de.schachassistent.board.Square
 import de.schachassistent.capture.ScreenCapturer
 import de.schachassistent.engine.ChessEngine
 import de.schachassistent.engine.EngineFactory
@@ -14,7 +13,17 @@ import de.schachassistent.overlay.Turn
 import de.schachassistent.recognition.BoardVision
 import de.schachassistent.recognition.BroadcastFenSource
 import de.schachassistent.recognition.Fen
-import de.schachassistent.vision.PositionTracker
+import de.schachassistent.chess.MoveStyle
+import de.schachassistent.chess.Position
+import de.schachassistent.engine.EngineSettings
+import de.schachassistent.vision.GameTracker
+import android.content.Context
+import android.graphics.Bitmap
+import android.content.ContentValues
+import android.provider.MediaStore
+import android.os.Build
+import android.os.Environment
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +41,7 @@ import kotlin.math.roundToInt
  * Läuft komplett im Main-Thread-Scope des Services; Schweres passiert in Dispatchers.Default/IO.
  */
 class AnalysisPipeline(
+    private val context: Context,
     private val scope: CoroutineScope,
     private val overlay: OverlayController,
     private val store: BoardCalibrationStore,
@@ -40,12 +50,12 @@ class AnalysisPipeline(
     private val vision: BoardVision,
     private val engineFactory: EngineFactory,
 ) {
-    private val tracker = PositionTracker()
+    private val tracker = GameTracker().also { t -> store.load()?.let { t.setOrientation(it.whiteAtBottom) } }
+    private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private var engine: ChessEngine? = null
     private var liveJob: Job? = null
     private var searchJob: Job? = null
     private var lastFen: String? = null
-    private var lastPieces: Map<Square, Char?>? = null
     @Volatile private var forceRead = false
 
     init {
@@ -100,18 +110,46 @@ class AnalysisPipeline(
 
     /** Antippen der Zug-Anzeige: wer am Zug ist von Hand umschalten. */
     fun toggleTurn() {
-        val fen = lastFen ?: return
-        val parts = fen.split(' ').toMutableList()
-        val newSide = if (parts[1] == "w") 'b' else 'w'
-        parts[1] = newSide.toString()
-        tracker.forceSide(newSide)
-        respond(parts.joinToString(" "))
+        tracker.flipSide()
+        tracker.position?.let { respond(it) }
     }
 
     /** Stellung kam direkt vom Spiel. */
-    fun onDirectFen() { directFen.latestFen?.let { respond(it) } }
+    fun onDirectFen() { directFen.latestFen?.let { respond(Position.fromFen(it)) } }
 
-    fun onRegionChanged() { tracker.reset(); lastFen = null; lastPieces = null; forceRead = true }
+    fun onRegionChanged() {
+        tracker.reset()
+        store.load()?.let { tracker.setOrientation(it.whiteAtBottom) }
+        lastFen = null; forceRead = true
+    }
+
+    /** Lange auf ♞ drücken: aktuellen Bildschirm speichern, damit man Erkennungsprobleme nachvollziehen kann. */
+    fun saveDiagnostics() {
+        scope.launch {
+            val img = capturer.fullImg() ?: return@launch
+            val name = withContext(Dispatchers.IO) {
+                val bmp = Bitmap.createBitmap(img.pixels, img.width, img.height, Bitmap.Config.ARGB_8888)
+                val fileName = "schach_diagnose_${System.currentTimeMillis()}.png"
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SchachAssistent")
+                        }
+                        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                        uri?.let { u -> context.contentResolver.openOutputStream(u)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+                        "Galerie › Bilder › SchachAssistent"
+                    } else {
+                        val f = java.io.File(context.getExternalFilesDir(null), fileName)
+                        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        f.absolutePath
+                    }
+                } catch (e: Exception) { null } finally { bmp.recycle() }
+            }
+            overlay.setStatus(if (name != null) "Diagnose-Bild gespeichert: $name" else "Speichern fehlgeschlagen")
+        }
+    }
 
     fun close() {
         liveJob?.cancel()
@@ -190,48 +228,43 @@ class AnalysisPipeline(
     private suspend fun readAndRespond(): Boolean {
         val region = store.load() ?: return false
         if (!vision.hasTemplates) return false
-        val reading = vision.read(region, overlay.occlusionMask(region))
-        if (reading == null || reading.uncertain > MAX_UNCERTAIN) {
+        val cells = vision.scores(region, overlay.occlusionMask(region)) ?: return false
+        // Sicherung 1: sieht das überhaupt nach unserem Brett aus?
+        val readable = cells.count { c -> c != null && (c.values.minOrNull() ?: 1f) < READABLE }
+        val hidden = cells.count { it == null }
+        if (readable + hidden < 52) {
             overlay.clearArrows(); overlay.setTurn(Turn.UNKNOWN); overlay.setEval("")
             overlay.setStatus("Kein Brett erkannt")
             return false
         }
-        // Felder unter der Leiste o. ä.: letzten bekannten Stand übernehmen
-        var pieces = reading.pieces
-        if (reading.unknown.isNotEmpty()) {
-            val prev = lastPieces
-            if (prev == null) {
-                overlay.moveBarOffBoard(region)
-                overlay.setStatus("Leiste lag auf dem Brett – verschoben"); return false
-            }
-            pieces = pieces + reading.unknown.associateWith { prev[it] }
+        // Sicherungen 2 + 3: legale Züge verfolgen bzw. plausibel neu einlesen
+        val r = tracker.update(cells, defaultSideToMove = region.whiteAtBottom)
+        if (r == null) {
+            overlay.setStatus("Prüfe Stellung …")
+            forceRead = true            // gleich noch einmal lesen und bestätigen
+            return true
         }
-        val kings = pieces.values.count { it == 'K' } to pieces.values.count { it == 'k' }
-        if (kings.first != 1 || kings.second != 1) {
-            overlay.clearArrows()
-            overlay.setStatus(if (kings.first != 1) "Weißer König nicht erkannt" else "Schwarzer König nicht erkannt")
-            return false
+        if (r.whiteAtBottom != region.whiteAtBottom) {
+            val flipped = region.copy(whiteAtBottom = r.whiteAtBottom)
+            store.save(flipped); overlay.setRegion(flipped)
         }
-        lastPieces = pieces
-        val mySide = mySide(region)
-        tracker.update(pieces, mySide)
-        val side = tracker.sideToMove ?: mySide
-        val fen = Fen.build(pieces, side) ?: run {
-            overlay.clearArrows(); overlay.setStatus("Stellung ungültig (Bauer auf Grundreihe?)"); return false
-        }
-        if (fen != lastFen || overlay.currentArrows.isEmpty()) respond(fen)
+        val fen = r.position.toFen()
+        if (fen != lastFen || (overlay.currentArrows.isEmpty() && r.position.whiteToMove == r.whiteAtBottom)) respond(r.position)
         return true
     }
 
     /** Zeigt Zug-Anzeige und startet Stockfish. Pfeil nur, wenn du dran bist. */
-    private fun respond(fen: String) {
+    private fun respond(pos: Position) {
+        val fen = pos.toFen()
         lastFen = fen
-        val region = store.load()
-        val mySide = if (region != null) mySide(region) else 'w'
-        val side = fen.split(' ')[1][0]
-        val mine = side == mySide
+        val myWhite = store.load()?.whiteAtBottom ?: true
+        val mine = pos.whiteToMove == myWhite
         overlay.setTurn(if (mine) Turn.MINE else Turn.OPPONENT)
         if (!mine) overlay.clearArrows()
+
+        val elo = prefs.getInt(KEY_ELO, 0).takeIf { it in 1320..3190 }
+        val aggression = prefs.getInt(KEY_AGGRESSION, 0) / 100f
+        val settings = EngineSettings(elo, if (mine && aggression > 0.01f) 4 else 1)
 
         searchJob?.cancel()
         engine?.stopSearch()
@@ -239,23 +272,36 @@ class AnalysisPipeline(
             val eng = engine ?: engineFactory.create()?.also { engine = it }
             if (eng == null) { overlay.setStatus("Stockfish fehlt"); return@launch }
             overlay.setStatus(if (mine) "Rechne …" else "Gegner ist am Zug")
-            val result = eng.analyze(fen, if (mine) MY_MOVETIME_MS else OPP_MOVETIME_MS) { u ->
-                scope.launch(Dispatchers.Main) { if (lastFen == fen) show(u, mine, side, mySide) }
+            val result = eng.analyze(fen, if (mine) MY_MOVETIME_MS else OPP_MOVETIME_MS, settings) { u ->
+                // Live-Pfeil nur bei voller Stärke ohne Stil – sonst erst das Endergebnis zeigen
+                scope.launch(Dispatchers.Main) {
+                    if (lastFen == fen) {
+                        if (mine && settings.elo == null && settings.multiPv == 1) overlay.showArrows(listOf(Arrow(u.move, ArrowStyle.MINE)))
+                        overlay.setEval(formatEval(u, mine))
+                    }
+                }
             }
             if (lastFen != fen) return@launch
             if (result == null) {
                 overlay.clearArrows(); overlay.setEval("")
                 overlay.setStatus("Partie vorbei (Matt/Patt)")
-            } else {
-                show(result, mine, side, mySide)
-                overlay.setStatus(if (mine) "Bester Zug ${result.move} · Tiefe ${result.depth}" else "Gegner ist am Zug")
+                return@launch
             }
+            var move = result.bestMove
+            if (aggression > 0.01f && result.lines.size > 1) {
+                val cands = result.lines.map { MoveStyle.Candidate(it.move, it.comparableCp) }
+                // Bei begrenzter Elo bleibt Stockfishs (schwächerer) Zug der Maßstab: nichts deutlich Stärkeres vorschlagen
+                val ref = cands.firstOrNull { it.move == move }
+                val pool = if (elo != null && ref != null) cands.filter { it.scoreCp <= ref.scoreCp + 30 } else cands
+                MoveStyle.choose(pos, pool, aggression)?.let { move = it }
+            }
+            result.lines.firstOrNull { it.move == move }?.let { overlay.setEval(formatEval(it, mine)) }
+            if (mine) {
+                overlay.showArrows(listOf(Arrow(move, ArrowStyle.MINE)))
+                val strength = elo?.let { "Elo $it" } ?: "max"
+                overlay.setStatus("Zug $move · Stärke $strength · Stil ${(aggression * 100).roundToInt()} %")
+            } else overlay.setStatus("Gegner ist am Zug")
         }
-    }
-
-    private fun show(u: EngineUpdate, mine: Boolean, side: Char, mySide: Char) {
-        if (mine) overlay.showArrows(listOf(Arrow(u.move, ArrowStyle.MINE)))
-        overlay.setEval(formatEval(u, side == mySide))
     }
 
     /** Bewertung immer aus deiner Sicht. */
@@ -310,7 +356,9 @@ class AnalysisPipeline(
         const val STABLE_MS = 120L
         const val POINT_DELTA = 30f
         const val MIN_CHANGED_POINTS = 4
-        const val MAX_UNCERTAIN = 3
+        const val READABLE = 0.3f
+        const val KEY_ELO = "elo"
+        const val KEY_AGGRESSION = "aggression"
         const val MY_MOVETIME_MS = 1500L
         const val OPP_MOVETIME_MS = 700L
     }

@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -86,9 +87,10 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(18), dp(14), dp(18), dp(14))
             setOnClickListener { pickGame() }
         }
+        val settingsCard = buildSettingsCard()
         val steps = TextView(this).apply {
-            text = "1  Starten antippen\n2  „Gesamten Bildschirm“ erlauben\n3  Neue Partie beginnen – fertig.\n\n" +
-                "Grüner Pfeil = dein bester Zug. Die Leiste zeigt, wer dran ist."
+            text = "1  START  ·  2  Aufnahme erlauben  ·  3  Neue Partie\n" +
+                "Lange auf ♞ drücken speichert ein Diagnose-Bild."
             textSize = 14f; setTextColor(Color.argb(190, 255, 255, 255))
             setLineSpacing(0f, 1.25f)
             background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(CARD) }
@@ -99,12 +101,13 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setBackgroundColor(BG)
-            setPadding(dp(24), dp(56), dp(24), dp(24))
+            setPadding(dp(20), dp(40), dp(20), dp(20))
             addView(title)
             addView(subtitle)
             addView(View(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
-            addView(startButton, LinearLayout.LayoutParams(dp(200), dp(200)))
+            addView(startButton, LinearLayout.LayoutParams(dp(170), dp(170)))
             addView(View(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
+            addView(settingsCard, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
             addView(gameRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
             addView(steps, LinearLayout.LayoutParams(-1, -2))
         })
@@ -144,6 +147,53 @@ class MainActivity : AppCompatActivity() {
         val pkg = prefs.getString(KEY_GAME, null)
         val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
         if (launch != null) startActivity(launch) else moveTaskToBack(true)
+    }
+
+    // ---------------------------------------------------------------- Einstellungen
+
+    /** Stärke (Elo) und Aggressivität – gelten ab dem nächsten Zug, auch während der Assistent läuft. */
+    private fun buildSettingsCard(): View {
+        val eloLabel = TextView(this).apply { setTextColor(Color.WHITE); textSize = 15f }
+        val eloBar = SeekBar(this).apply {
+            max = (3190 - 1320) / 10 + 1          // letzter Schritt = volle Stärke
+            val elo = prefs.getInt(KEY_ELO, 0)
+            progress = if (elo in 1320..3190) (elo - 1320) / 10 else max
+        }
+        fun eloText(p: Int) = if (p >= eloBar.max) "Stärke:  Maximum (≈3500)" else "Stärke:  ${1320 + p * 10} Elo"
+        eloLabel.text = eloText(eloBar.progress)
+        eloBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                eloLabel.text = eloText(p)
+                prefs.edit().putInt(KEY_ELO, if (p >= sb.max) 0 else 1320 + p * 10).apply()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        val aggLabel = TextView(this).apply { setTextColor(Color.WHITE); textSize = 15f }
+        val aggBar = SeekBar(this).apply { max = 100; progress = prefs.getInt(KEY_AGGRESSION, 0) }
+        fun aggText(p: Int) = "Aggressivität:  $p %  " + when {
+            p < 15 -> "(solide – immer der beste Zug)"
+            p < 50 -> "(ausgewogen)"
+            p < 80 -> "(angriffslustig)"
+            else -> "(Vollangriff)"
+        }
+        aggLabel.text = aggText(aggBar.progress)
+        aggBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                aggLabel.text = aggText(p); prefs.edit().putInt(KEY_AGGRESSION, p).apply()
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(CARD) }
+            setPadding(dp(18), dp(14), dp(18), dp(10))
+            addView(eloLabel); addView(eloBar, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            addView(aggLabel); addView(aggBar, LinearLayout.LayoutParams(-1, -2))
+        }
     }
 
     // ---------------------------------------------------------------- Spiel wählen
@@ -191,6 +241,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val KEY_GAME = "game_package"
+        const val KEY_ELO = "elo"
+        const val KEY_AGGRESSION = "aggression"
         val BG = Color.rgb(15, 17, 21)
         val CARD = Color.rgb(28, 31, 38)
         val GREEN_LIGHT = Color.rgb(0, 214, 130)

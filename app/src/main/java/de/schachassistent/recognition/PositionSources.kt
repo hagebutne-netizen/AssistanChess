@@ -50,6 +50,12 @@ class BoardVision(context: Context, private val capturer: ScreenCapturer) {
         t.read(img, region.whiteAtBottom, occluded.takeIf { it?.size == img.width * img.height })
     }
 
+    suspend fun scores(region: BoardRegion, occluded: BooleanArray?): Array<Map<Char, Float>?>? = withContext(Dispatchers.Default) {
+        val t = templates ?: return@withContext null
+        val img = boardImg(region) ?: return@withContext null
+        t.scoreBoard(img, occluded.takeIf { it?.size == img.width * img.height })
+    }
+
     fun forget() { templates = null; file.delete() }
 
     private fun boardImg(r: BoardRegion): Img? =

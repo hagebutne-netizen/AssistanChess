@@ -160,6 +160,17 @@ class PieceTemplates(val samples: Map<Char, List<SquareFeature>>) {
         return result
     }
 
+    /**
+     * Abstände je Bildschirmfeld (Index row*8+col) zu jeder Figurenart. null = Feld verdeckt.
+     * Grundlage für die Zugverfolgung, die damit die wahrscheinlichste LEGALE Stellung sucht.
+     */
+    fun scoreBoard(board: Img, occluded: BooleanArray? = null): Array<Map<Char, Float>?> {
+        val feats = SquareFeature.extractAll(board, occluded)
+        return Array(64) { k ->
+            if (feats[k].validCount < SquareFeature.N * SquareFeature.N / 3) null else scores(feats[k])
+        }
+    }
+
     fun read(board: Img, whiteAtBottom: Boolean, occluded: BooleanArray? = null): BoardReading {
         val feats = SquareFeature.extractAll(board, occluded)
         val squares = Array(64) { k -> squareAt(k % 8, k / 8, whiteAtBottom) }

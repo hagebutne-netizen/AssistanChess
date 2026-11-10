@@ -97,6 +97,7 @@ class AssistantService : LifecycleService() {
         val ov = OverlayController(this, store)
         overlay = ov
         val pipe = AnalysisPipeline(
+            context = this,
             scope = lifecycleScope,
             overlay = ov,
             store = store,
@@ -111,6 +112,7 @@ class AssistantService : LifecycleService() {
         ov.onToggleLive = { pipe.toggleLive() }
         ov.onRegionChanged = { pipe.onRegionChanged() }
         ov.onToggleTurn = { pipe.toggleTurn() }
+        ov.onDiagnose = { pipe.saveDiagnostics() }
         ov.onClose = { stopSelf() }
         fen.onNewFen = { pipe.onDirectFen() } // Spiel schickt neue Stellung -> sofort rechnen
         ov.show()

@@ -24,33 +24,48 @@ class UciEngine(private val binaryPath: String) : ChessEngine {
         withContext(Dispatchers.IO) { mutex.withLock { try { ensureStarted() } catch (e: IOException) { Log.e(TAG, "Start fehlgeschlagen", e) } } }
     }
 
-    override suspend fun analyze(fen: String, movetimeMs: Long, onUpdate: (EngineUpdate) -> Unit): EngineUpdate? =
+    private var applied: EngineSettings? = null
+
+    private fun applySettings(s: EngineSettings) {
+        if (s == applied) return
+        if (s.elo == null) {
+            send("setoption name UCI_LimitStrength value false")
+        } else {
+            send("setoption name UCI_LimitStrength value true")
+            send("setoption name UCI_Elo value ${s.elo.coerceIn(1320, 3190)}")
+        }
+        send("setoption name MultiPV value ${s.multiPv.coerceIn(1, 5)}")
+        send("isready"); readUntil { it == "readyok" }
+        applied = s
+    }
+
+    override suspend fun analyze(fen: String, movetimeMs: Long, settings: EngineSettings, onUpdate: (EngineUpdate) -> Unit): EngineResult? =
         // NonCancellable: eine Suche wird immer bis "bestmove" gelesen, sonst geraten Antworten
         // durcheinander. Abbrechen geht schnell über stopSearch().
         withContext(Dispatchers.IO + NonCancellable) {
             mutex.withLock {
                 try {
                     ensureStarted()
+                    applySettings(settings)
                     send("position fen $fen")
                     searching = true
                     send("go movetime $movetimeMs")
-                    var last: EngineUpdate? = null
-                    var result: EngineUpdate? = null
+                    var lastMain: EngineUpdate? = null
+                    val lines = HashMap<Int, EngineUpdate>()
+                    var result: EngineResult? = null
                     while (true) {
                         val line = readLine()
                         if (line.startsWith("info ") && " pv " in line) {
                             val u = parseInfo(line) ?: continue
-                            if (last == null || u.depth > last.depth || u.move != last.move) {
-                                last = u
+                            lines[u.multipv] = u
+                            if (u.multipv == 1 && (lastMain == null || u.depth > lastMain.depth || u.move != lastMain.move)) {
+                                lastMain = u
                                 onUpdate(u)
                             }
                         } else if (line.startsWith("bestmove")) {
                             searching = false
                             val best = Move.fromUci(line.split(" ").getOrNull(1) ?: "")
-                            if (best != null) {
-                                result = (last?.takeIf { it.move == best }
-                                    ?: EngineUpdate(best, last?.depth ?: 0, last?.scoreCp, last?.mateIn, false)).copy(final = true)
-                            }
+                            if (best != null) result = EngineResult(best, lines.values.sortedBy { it.multipv })
                             break
                         }
                     }
@@ -78,13 +93,15 @@ class UciEngine(private val binaryPath: String) : ChessEngine {
             "cp" -> cp = t.getOrNull(si + 2)?.toIntOrNull()
             "mate" -> mate = t.getOrNull(si + 2)?.toIntOrNull()
         }
-        return EngineUpdate(move, depth, cp, mate, false)
+        val multipv = after("multipv")?.toIntOrNull() ?: 1
+        return EngineUpdate(move, depth, cp, mate, multipv)
     }
 
     private fun ensureStarted() {
         if (process?.isAlive == true) return
         val p = ProcessBuilder(binaryPath).redirectErrorStream(true).start()
         process = p
+        applied = null
         reader = p.inputStream.bufferedReader()
         writer = p.outputStream.bufferedWriter()
         send("uci"); readUntil { it == "uciok" }
