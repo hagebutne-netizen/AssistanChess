@@ -24,9 +24,8 @@ import de.schachassistent.board.BoardCalibrationStore
 import de.schachassistent.engine.EngineFactory
 import de.schachassistent.overlay.OverlayController
 import de.schachassistent.pipeline.AnalysisPipeline
+import de.schachassistent.recognition.BoardVision
 import de.schachassistent.recognition.BroadcastFenSource
-import de.schachassistent.recognition.ScreenPositionSource
-import de.schachassistent.recognition.UnimplementedBoardRecognizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -102,14 +101,19 @@ class AssistantService : LifecycleService() {
             overlay = ov,
             store = store,
             directFen = fen,
-            screenSource = ScreenPositionSource(cap, UnimplementedBoardRecognizer()),
+            capturer = cap,
+            vision = BoardVision(this, cap),
             engineFactory = EngineFactory(this),
         )
         pipeline = pipe
         ov.onAnalyze = { pipe.analyzeOnce() }
+        ov.onAuto = { pipe.autoSetup() }
+        ov.onToggleLive = { pipe.toggleLive() }
+        ov.onRegionChanged = { pipe.onRegionChanged() }
         ov.onClose = { stopSelf() }
         fen.onNewFen = { pipe.analyzeOnce() } // Spiel schickt neue Stellung -> sofort rechnen
         ov.show()
+        pipe.startLive() // Ein Klick: ab jetzt läuft alles automatisch
 
         _running.value = true
     }

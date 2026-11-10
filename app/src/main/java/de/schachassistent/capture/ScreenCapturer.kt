@@ -11,6 +11,7 @@ import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import de.schachassistent.vision.Img
 import kotlinx.coroutines.delay
 
 /**
@@ -81,25 +82,43 @@ class ScreenCapturer(private val context: Context, private val projection: Media
         }
     }
 
-    /** Kopie des letzten Bildschirminhalts in Bildschirmgröße, oder null, falls noch keins da ist. */
-    fun latestFrame(): Bitmap? = synchronized(lock) {
-        val b = buffer ?: return null
-        Bitmap.createBitmap(b, 0, 0, minOf(width, b.width), minOf(height, b.height))
-    }
-
-    /**
-     * Wartet auf ein Bild, das NACH dem Aufruf entstanden ist (z. B. nachdem das Overlay
-     * Pfeile ausgeblendet hat). Fällt nach [timeoutMs] auf das letzte vorhandene Bild zurück,
-     * weil bei unverändertem Bildschirm kein neues Bild kommt.
-     */
-    suspend fun freshFrame(timeoutMs: Long = 300): Bitmap? {
+    /** Wartet bis zu [timeoutMs] auf ein neues Bild. true = neues Bild da. */
+    suspend fun awaitNewFrame(timeoutMs: Long = 300): Boolean {
         val startCount = synchronized(lock) { frameCounter }
         var waited = 0L
         while (waited < timeoutMs) {
-            if (synchronized(lock) { frameCounter } > startCount) break
+            if (synchronized(lock) { frameCounter } > startCount) return true
             delay(20); waited += 20
         }
-        return latestFrame()
+        return false
+    }
+
+    /** Ausschnitt des letzten Bildes als [Img] (für die Bilderkennung). */
+    fun cropImg(left: Int, top: Int, w: Int, h: Int): Img? = synchronized(lock) {
+        val b = buffer ?: return null
+        val l = left.coerceIn(0, width - 1); val t = top.coerceIn(0, height - 1)
+        val cw = w.coerceAtMost(width - l); val ch = h.coerceAtMost(height - t)
+        if (cw <= 0 || ch <= 0) return null
+        val px = IntArray(cw * ch)
+        b.getPixels(px, 0, cw, l, t, cw, ch)
+        Img(cw, ch, px)
+    }
+
+    fun fullImg(): Img? = cropImg(0, 0, width, height)
+
+    /**
+     * Grober Fingerabdruck eines Bereichs (n x n Helligkeitswerte), um Änderungen
+     * am Brett billig zu erkennen, ohne jedes Mal die volle Erkennung laufen zu lassen.
+     */
+    fun signature(left: Float, top: Float, w: Float, h: Float, n: Int = 24): FloatArray? = synchronized(lock) {
+        val b = buffer ?: return null
+        val out = FloatArray(n * n)
+        for (j in 0 until n) for (i in 0 until n) {
+            val x = (left + (i + 0.5f) * w / n).toInt().coerceIn(0, width - 1)
+            val y = (top + (j + 0.5f) * h / n).toInt().coerceIn(0, height - 1)
+            out[j * n + i] = Img.lum(b.getPixel(x, y)).toFloat()
+        }
+        out
     }
 
     fun stop() {

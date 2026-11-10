@@ -28,7 +28,14 @@ class OverlayController(
     private val store: BoardCalibrationStore,
 ) {
     var onAnalyze: () -> Unit = {}
+    var onAuto: () -> Unit = {}
+    var onToggleLive: () -> Unit = {}
+    var onRegionChanged: () -> Unit = {}
     var onClose: () -> Unit = {}
+
+    /** true, solange der Nutzer das Brett von Hand markiert. */
+    val isSelecting get() = selectionRoot != null
+    val currentArrows: List<Arrow> get() = arrowView.arrows
 
     private val wm = context.getSystemService(WindowManager::class.java)
     private val density = context.resources.displayMetrics.density
@@ -37,6 +44,7 @@ class OverlayController(
     private lateinit var controlBar: LinearLayout
     private lateinit var controlParams: WindowManager.LayoutParams
     private lateinit var statusText: TextView
+    private lateinit var liveButton: TextView
     private var selectionRoot: View? = null
     private var shown = false
 
@@ -47,7 +55,7 @@ class OverlayController(
         safeAdd(arrowView, fullScreenParams(touchable = false))
         buildControlBar()
         safeAdd(controlBar, controlParams)
-        setStatus(if (arrowView.region == null) "Tippe auf \"Brett\", um das Brett zu markieren" else "Bereit")
+        setStatus("Bereit")
     }
 
     fun hide() {
@@ -61,6 +69,8 @@ class OverlayController(
     fun showArrows(arrows: List<Arrow>) { arrowView.arrows = arrows }
     fun clearArrows() { arrowView.arrows = emptyList() }
     fun setStatus(text: String) { if (::statusText.isInitialized) statusText.text = text }
+    fun setRegion(region: BoardRegion) { arrowView.region = region }
+    fun setLive(on: Boolean) { if (::liveButton.isInitialized) liveButton.text = if (on) "● Live" else "○ Live" }
 
     // ---------------------------------------------------------------- Brett markieren
 
@@ -109,6 +119,7 @@ class OverlayController(
         if (region != null) {
             store.save(region)
             arrowView.region = region
+            onRegionChanged()
             arrowView.showGrid = true   // Raster zur Kontrolle direkt anzeigen
             setStatus("Brett gespeichert. Raster prüfen, dann \"Analyse\".")
         }
@@ -152,9 +163,12 @@ class OverlayController(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(handle)
+            liveButton = barButton("○ Live") { onToggleLive() }
+            addView(liveButton)
+            addView(barButton("Auto") { onAuto() })
+            addView(barButton("Zug") { onAnalyze() })
             addView(barButton("Brett") { startBoardSelection() })
-            addView(barButton("Raster") { arrowView.showGrid = !arrowView.showGrid })
-            addView(barButton("Analyse") { onAnalyze() })
+            addView(barButton("#") { arrowView.showGrid = !arrowView.showGrid })
             addView(barButton("✕") { onClose() })
         }
         statusText = TextView(context).apply {
@@ -172,9 +186,9 @@ class OverlayController(
 
     private fun barButton(label: String, onClick: () -> Unit) = TextView(context).apply {
         text = label
-        textSize = 15f
+        textSize = 14f
         setTextColor(Color.WHITE)
-        val h = dp(10); val v = dp(8)
+        val h = dp(8); val v = dp(8)
         setPadding(h, v, h, v)
         setOnClickListener { onClick() }
     }

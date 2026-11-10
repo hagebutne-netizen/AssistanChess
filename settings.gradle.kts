@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "SchachAssistent"
-include(":app")
+include(":app", ":chesscore")
