@@ -170,4 +170,103 @@ class UserBoardTest {
         assertEquals(false, r.whiteAtBottom)
         assertEquals(placement, r.position.toFen().substringBefore(' '))
     }
+
+    // ------------------------------------------------------------ Störungen im echten Spiel (PC: Maus ziehen, Zug-Punkte …)
+
+    private fun sqRect(sq: Square, wab: Boolean = true): java.awt.Rectangle {
+        val col = if (wab) sq.file else 7 - sq.file; val row = if (wab) 7 - sq.rank else sq.rank
+        return java.awt.Rectangle(cell(col), cell(row), cell(col + 1) - cell(col), cell(row + 1) - cell(row))
+    }
+
+    /** Spiel-Effekte auf ein Brettbild malen. */
+    private fun decorate(
+        img: BufferedImage, highlight: List<String> = emptyList(), dots: List<String> = emptyList(),
+        lift: String? = null, floatAt: Pair<Float, Float>? = null, liftPiece: Char? = null,
+    ): BufferedImage {
+        val out = BufferedImage(n, n, BufferedImage.TYPE_INT_RGB); val g = out.createGraphics(); g.drawImage(img, 0, 0, null)
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        var floating: BufferedImage? = null
+        if (lift != null) {
+            // Figur vom Feld nehmen (Feld leer malen), Figurenbild merken
+            val r = sqRect(Square.parse(lift))
+            floating = BufferedImage(r.width, r.height, BufferedImage.TYPE_INT_ARGB)
+            val bg = bgColor(Square.parse(lift))
+            for (y in 0 until r.height) for (x in 0 until r.width) {
+                val c = img.getRGB(r.x + x, r.y + y)
+                if (dist(c, bg) > 24 && dist(c, 0xF6F669) > 40) floating.setRGB(x, y, c or (0xFF shl 24))
+                out.setRGB(r.x + x, r.y + y, bg)
+            }
+        }
+        for (h in highlight) {          // Markierung UNTER der Figur (nur Hintergrund-Pixel einfärben), wie in echten Spielen
+            val sq = Square.parse(h); val r = sqRect(sq); val bg = bgColor(sq)
+            for (y in 0 until r.height) for (x in 0 until r.width) {
+                val c = out.getRGB(r.x + x, r.y + y)
+                if (dist(c, bg) <= 24) {
+                    val rr = (((c shr 16) and 255) * 145 + 255 * 110) / 255; val gg = (((c shr 8) and 255) * 145 + 255 * 110) / 255; val bb = ((c and 255) * 145) / 255
+                    out.setRGB(r.x + x, r.y + y, (rr shl 16) or (gg shl 8) or bb)
+                }
+            }
+        }
+        for (d in dots) { val r = sqRect(Square.parse(d)); val rad = r.width * 0.17; g.color = Color(0, 0, 0, 36)
+            g.fill(java.awt.geom.Ellipse2D.Double(r.centerX - rad, r.centerY - rad, 2 * rad, 2 * rad)) }
+        if (floating != null && floatAt != null) g.drawImage(floating, (floatAt.first * n / 8).toInt(), (floatAt.second * n / 8).toInt(), null)
+        g.dispose()
+        return out
+    }
+
+    private fun cellsOf(t: PieceTemplates, img: BufferedImage) = t.scoreBoard(boardOf(phone(img)))
+
+    private fun startedTracker(t: PieceTemplates, vararg moves: String): Pair<de.schachassistent.vision.GameTracker, de.schachassistent.chess.Position> {
+        val tracker = de.schachassistent.vision.GameTracker()
+        var pos = de.schachassistent.chess.Position.fromFen(de.schachassistent.chess.Position.START_FEN)
+        tracker.update(scores(t, pos.toFen().substringBefore(' ')), now = 0)
+        var now = 1000L
+        for (m in moves) {
+            pos = pos.apply(de.schachassistent.board.Move.fromUci(m)!!)
+            val r = tracker.update(scores(t, pos.toFen().substringBefore(' ')), now = now); now += 1000
+            assertEquals(pos.toFen(), r!!.position.toFen())
+        }
+        return tracker to pos
+    }
+
+    @Test fun ignoresHighlightsDotsAndDraggedPieces() {
+        val (t, _) = PieceTemplates.learnFromStart(boardOf(phone(src)))!!
+        val (tracker, pos) = startedTracker(t, "e2e4")          // Schwarz am Zug
+        val board = compose(pos.toFen().substringBefore(' '))
+        val fen = pos.toFen()
+        var now = 10_000L
+        val disturbances = listOf(
+            "Letzter-Zug-Markierung" to decorate(board, highlight = listOf("e2", "e4")),
+            "Figur angeklickt + Zug-Punkte" to decorate(board, highlight = listOf("e2", "e4", "g8"), dots = listOf("f6", "h6")),
+            "Bauer angeklickt + Punkte" to decorate(board, highlight = listOf("e7"), dots = listOf("e6", "e5")),
+            "Bauer hochgehoben (Maus gedrückt)" to decorate(board, lift = "e7"),
+            "Bauer schwebt zwischen e6/e5" to decorate(board, lift = "e7", floatAt = 4f to 2.5f),
+            "Springer halb gezogen (Animation)" to decorate(board, lift = "g8", floatAt = 5.5f to 1f),
+        )
+        for ((name, img) in disturbances) {
+            repeat(4) {                                   // mehrfach lesen über ~1 s
+                val r = tracker.update(cellsOf(t, img), now = now); now += 300
+                if (r != null) assertEquals("$name: Stellung darf sich nicht ändern", fen, r.position.toFen())
+            }
+            assertEquals("$name: Schwarz muss weiter am Zug sein", fen, tracker.position!!.toFen())
+        }
+        // danach der echte Zug
+        val after = pos.apply(de.schachassistent.board.Move.fromUci("e7e5")!!)
+        val r = tracker.update(cellsOf(t, decorate(compose(after.toFen().substringBefore(' ')), highlight = listOf("e7", "e5"))), now = now)
+        assertEquals(after.toFen(), r!!.position.toFen())
+    }
+
+    @Test fun noPhantomOpponentMoveAfterMyMove() {
+        val (t, _) = PieceTemplates.learnFromStart(boardOf(phone(src)))!!
+        val (tracker, pos) = startedTracker(t, "e2e4", "e7e5")   // Weiß (ich) am Zug
+        // Ich ziehe Sf3 – das Spiel markiert g1/f3 und der Gegner hat schon eine Figur angeklickt (Punkte)
+        val after = pos.apply(de.schachassistent.board.Move.fromUci("g1f3")!!)
+        val img = decorate(compose(after.toFen().substringBefore(' ')), highlight = listOf("g1", "f3", "b8"), dots = listOf("a6", "c6"))
+        var now = 50_000L
+        repeat(5) {
+            val r = tracker.update(cellsOf(t, img), now = now); now += 300
+            assertNotNull(r)
+            assertEquals("nur mein Zug, Gegner ist noch dran", after.toFen(), r!!.position.toFen())
+        }
+    }
 }

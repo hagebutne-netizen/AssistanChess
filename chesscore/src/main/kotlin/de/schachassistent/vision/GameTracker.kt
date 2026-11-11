@@ -11,8 +11,12 @@ import de.schachassistent.chess.Position
  *     entstehen. Gewählt wird der legale Zug, der am besten zum Bild passt. Einzelne Lesefehler
  *     werden so automatisch korrigiert; wer am Zug ist, Rochade und En passant sind exakt bekannt.
  *  3. Plausibilität: Ausrichtung (Weiß unten/oben), genau ein König je Farbe, keine Bauern auf der
- *     Grundreihe, Seite nicht am Zug steht nicht im Schach. Neu-Synchronisation nur, wenn zwei
- *     Lesungen hintereinander dasselbe ergeben.
+ *     Grundreihe, Seite nicht am Zug steht nicht im Schach. Neu-Synchronisation mitten in der Partie
+ *     nur, wenn das Bild über längere Zeit (≥ 1,2 s, bei "neuen" Figuren ≥ 3 s) dasselbe zeigt –
+ *     so führen gezogene Figuren, Zug-Punkte oder Animationen nicht zu einer falschen Stellung.
+ *
+ * Ein Zug wird nur übernommen, wenn er das Bild DEUTLICH besser erklärt als "nichts passiert"
+ * (bei zwei Halbzügen jeder Halbzug für sich), damit kein Phantom-Zug des Gegners entsteht.
  */
 class GameTracker {
 
@@ -23,6 +27,8 @@ class GameTracker {
     var position: Position? = null; private set
     var whiteAtBottom: Boolean = true; private set
     private var pendingSync: String? = null
+    private var pendingSince = 0L
+    private var pendingCount = 0
 
     fun reset() { position = null; pendingSync = null }
 
@@ -39,7 +45,10 @@ class GameTracker {
      * @param mySide Seite des Nutzers (für die Neu-Synchronisation mitten in der Partie)
      * @return neue Stellung, oder null wenn das Bild keine plausible Stellung zeigt
      */
-    fun update(cells: Array<Map<Char, Float>?>, defaultSideToMove: Boolean? = null): Result? {
+    fun update(
+        cells: Array<Map<Char, Float>?>, defaultSideToMove: Boolean? = null,
+        now: Long = System.currentTimeMillis(), commit: Boolean = true,
+    ): Result? {
         val independent = cells.sumOf { c -> (c?.values?.minOrNull() ?: 0f).toDouble() }.toFloat()
 
         // --- Sicherung 2: legale Züge von der bekannten Stellung aus
@@ -48,40 +57,53 @@ class GameTracker {
             val noChange = cost(cells, prev, whiteAtBottom)
             var best: Position = prev; var bestCost = noChange; var bestMoves = emptyList<Move>()
             val first = prev.legalMoves()
+            val firstCost = HashMap<Move, Float>()
             for (m in first) {
                 val p1 = prev.apply(m)
                 val c = cost(cells, p1, whiteAtBottom)
-                if (c < bestCost) { bestCost = c; best = p1; bestMoves = listOf(m) }
+                firstCost[m] = c
+                // ein Zug muss das Bild deutlich besser erklären als "nichts passiert"
+                if (c < bestCost && noChange - c >= MIN_GAIN) { bestCost = c; best = p1; bestMoves = listOf(m) }
             }
-            // Zwei Halbzüge (z. B. Gegner hat sehr schnell geantwortet)
+            // Zwei Halbzüge (z. B. Gegner hat sehr schnell geantwortet) – jeder muss im Bild sichtbar sein
             if (bestCost - independent > TOLERANCE) {
+                val oneMove = bestCost
                 for (m in first) {
+                    val c1 = firstCost[m]!!
+                    if (noChange - c1 < MIN_GAIN) continue
                     val p1 = prev.apply(m)
                     for (m2 in p1.legalMoves()) {
                         val p2 = p1.apply(m2)
-                        val c = cost(cells, p2, whiteAtBottom) + TWO_MOVE_PENALTY
-                        if (c < bestCost) { bestCost = c; best = p2; bestMoves = listOf(m, m2) }
+                        val c = cost(cells, p2, whiteAtBottom)
+                        if (c1 - c < MIN_GAIN || oneMove - c < MIN_GAIN) continue
+                        if (c + TWO_MOVE_PENALTY < bestCost) { bestCost = c + TWO_MOVE_PENALTY; best = p2; bestMoves = listOf(m, m2) }
                     }
                 }
             }
             if (bestCost - independent <= TOLERANCE) {
-                pendingSync = null
-                position = best
+                if (commit) { pendingSync = null; position = best }
                 return Result(best, whiteAtBottom, if (bestMoves.isEmpty()) Kind.NO_CHANGE else Kind.MOVE, bestMoves)
             }
         }
 
-        // --- Sicherung 3: unabhängig lesen, plausibel machen, zweimal bestätigen
+        // --- Sicherung 3: unabhängig lesen, plausibel machen, über längere Zeit bestätigen
         val synced = sync(cells, prev, defaultSideToMove) ?: return null
         val key = synced.first.toFen().substringBefore(" ") + synced.second
         val isStart = synced.first.toFen().startsWith(Position.START_FEN.substringBefore(" "))
-        if (prev != null && !isStart && pendingSync != key) {
-            pendingSync = key            // erst merken, beim nächsten Lesen bestätigen
-            return null
+        if (prev != null && !isStart) {
+            if (!commit) return null
+            if (pendingSync != key) { pendingSync = key; pendingSince = now; pendingCount = 1; return null }
+            pendingCount++
+            // Figuren können im Schach nicht dazukommen (außer Rücknahme) → dann viel länger warten
+            val more = morePieces(synced.first, prev)
+            val need = if (more) SYNC_MORE_PIECES_MS else SYNC_MS
+            if (pendingCount < 3 || now - pendingSince < need) return null
         }
-        pendingSync = null
-        position = synced.first
-        whiteAtBottom = synced.second
+        if (commit) {
+            pendingSync = null
+            position = synced.first
+            whiteAtBottom = synced.second
+        }
         return Result(synced.first, synced.second, Kind.SYNC, emptyList())
     }
 
@@ -147,6 +169,14 @@ class GameTracker {
         }
     }
 
+    /** Hat eine Seite mehr Figuren als vorher? (passiert nur bei Rücknahme/neuer Partie – oder Lesefehlern) */
+    private fun morePieces(p: Position, prev: Position): Boolean {
+        val now = p.board; val before = prev.board
+        val w = now.count { it.isUpperCase() } > before.count { it.isUpperCase() }
+        val b = now.count { it.isLowerCase() } > before.count { it.isLowerCase() }
+        return w || b
+    }
+
     /** Wie schlecht passt die Stellung zum Bild? Summe der Abstände aller Felder. */
     private fun cost(cells: Array<Map<Char, Float>?>, p: Position, wab: Boolean): Float {
         var c = 0f
@@ -162,5 +192,9 @@ class GameTracker {
         /** Erlaubter Mehr-Abstand gegenüber der freien Lesung (~2 knapp falsch gelesene Felder). */
         const val TOLERANCE = 0.6f
         const val TWO_MOVE_PENALTY = 0.05f
+        /** Mindest-Verbesserung je Halbzug (ein echter Zug bringt ~0,5–1,8; ein Feld falsch ~0,25–0,6) */
+        const val MIN_GAIN = 0.25f
+        const val SYNC_MS = 1200L
+        const val SYNC_MORE_PIECES_MS = 3000L
     }
 }

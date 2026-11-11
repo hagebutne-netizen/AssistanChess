@@ -41,6 +41,15 @@ object Win32 {
         return try { ext?.SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE) == true } catch (_: Throwable) { false }
     }
 
+    /** Ist gerade eine Maustaste gedrückt? (z. B. Figur wird mit der Maus gezogen) */
+    fun mouseButtonDown(): Boolean {
+        if (!isWindows) return false
+        return try {
+            (User32.INSTANCE.GetAsyncKeyState(0x01).toInt() and 0x8000) != 0 ||   // VK_LBUTTON
+                (User32.INSTANCE.GetAsyncKeyState(0x02).toInt() and 0x8000) != 0       // VK_RBUTTON (Linkshänder)
+        } catch (_: Throwable) { false }
+    }
+
     private const val WS_EX_TOOLWINDOW = 0x00000080
     private const val WS_EX_NOACTIVATE = 0x08000000
     private const val WDA_EXCLUDEFROMCAPTURE = 0x00000011

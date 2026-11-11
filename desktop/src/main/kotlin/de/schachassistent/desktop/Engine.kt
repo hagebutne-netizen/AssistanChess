@@ -22,6 +22,7 @@ class Engine(private val binary: File) {
     private val lines = LinkedBlockingQueue<String>()
     private val lock = Object()
     @Volatile private var searching = false
+    @Volatile private var pondering = false
     private var applied: Pair<Int, Int>? = null
 
     private fun ensureStarted() {
@@ -35,17 +36,27 @@ class Engine(private val binary: File) {
             lines.put("__eof__")
         }, "stockfish-reader").apply { isDaemon = true; start() }
         send("uci"); waitFor("uciok", 10_000)
-        val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 8)
+        // etwas Luft für das Spiel und die Erkennung lassen
+        val cores = Runtime.getRuntime().availableProcessors()
+        val threads = (if (cores <= 4) cores - 1 else cores * 3 / 4).coerceIn(1, 12)
         send("setoption name Threads value $threads")
         send("setoption name Hash value 256")
+        send("setoption name Ponder value true")
         applied = null
         send("isready"); waitFor("readyok", 10_000)
     }
 
     fun warmUp() = synchronized(lock) { try { ensureStarted() } catch (_: Exception) {} }
 
-    /** @param elo 0 = volle Stärke */
-    fun analyze(fen: String, movetimeMs: Long, elo: Int, multiPv: Int, onMain: (Line) -> Unit): SearchResult? = synchronized(lock) {
+    /**
+     * @param elo 0 = volle Stärke
+     * @param moves Züge nach [fen] (UCI, mit Leerzeichen) – fürs Vorausrechnen
+     * @param ponder true = "go ponder": rechnet, bis [ponderhit] oder [stop] kommt
+     */
+    fun analyze(
+        fen: String, movetimeMs: Long, elo: Int, multiPv: Int,
+        moves: String? = null, ponder: Boolean = false, ponderHit: () -> Boolean = { false }, onMain: (Line) -> Unit,
+    ): SearchResult? = synchronized(lock) {
         try {
             ensureStarted()
             val want = elo to multiPv
@@ -57,13 +68,16 @@ class Engine(private val binary: File) {
                 send("isready"); waitFor("readyok", 5_000)
                 applied = want
             }
-            send("position fen $fen")
+            send("position fen $fen" + (moves?.let { " moves $it" } ?: ""))
             searching = true
-            send("go movetime $movetimeMs")
+            pondering = ponder
+            send(if (ponder) "go ponder movetime $movetimeMs" else "go movetime $movetimeMs")
+            if (ponder && ponderHit()) ponderhit()        // Treffer kam schon, bevor die Suche lief
             val byPv = HashMap<Int, Line>()
             var lastMain: Line? = null
-            val deadline = System.currentTimeMillis() + movetimeMs + 15_000
-            while (System.currentTimeMillis() < deadline) {
+            var deadline = System.currentTimeMillis() + movetimeMs + 15_000
+            while (pondering || System.currentTimeMillis() < deadline) {
+                if (pondering) deadline = System.currentTimeMillis() + movetimeMs + 15_000
                 val l = lines.poll(500, TimeUnit.MILLISECONDS) ?: continue
                 if (l == "__eof__") throw IOException("Stockfish beendet")
                 if (l.startsWith("info ") && " pv " in l) {
@@ -71,21 +85,24 @@ class Engine(private val binary: File) {
                     byPv[u.multipv] = u
                     if (u.multipv == 1 && (lastMain == null || u.depth > lastMain.depth || u.move != lastMain.move)) { lastMain = u; onMain(u) }
                 } else if (l.startsWith("bestmove")) {
-                    searching = false
+                    searching = false; pondering = false
                     val best = Move.fromUci(l.split(" ").getOrNull(1) ?: "") ?: return null
                     return SearchResult(best, byPv.values.sortedBy { it.multipv })
                 }
             }
-            searching = false
+            searching = false; pondering = false
             null
         } catch (e: Exception) {
-            searching = false
+            searching = false; pondering = false
             process?.destroy(); process = null
             null
         }
     }
 
-    fun stop() { if (searching) try { send("stop") } catch (_: Exception) {} }
+    fun stop() { if (searching) try { pondering = false; send("stop") } catch (_: Exception) {} }
+
+    /** Der vorausberechnete Zug wurde gespielt: weiterrechnen wie bei einer normalen Suche. */
+    fun ponderhit() { if (searching && pondering) try { pondering = false; send("ponderhit") } catch (_: Exception) {} }
 
     fun close() { try { send("quit") } catch (_: Exception) {}; process?.destroy(); process = null }
 

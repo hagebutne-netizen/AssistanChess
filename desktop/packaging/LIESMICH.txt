@@ -10,11 +10,16 @@ So geht's
 4. Bist du am Zug, erscheint ein grüner Pfeil mit dem besten Zug über dem Brett.
    Klicks gehen durch den Pfeil hindurch – du spielst ganz normal weiter.
 
+Vorausrechnen
+- Während der Gegner überlegt, rechnet der Assistent schon die Antwort auf dessen wahrscheinlichsten Zug.
+  Spielt der Gegner diesen Zug, erscheint der Pfeil sofort.
+
 Falls etwas nicht klappt
 - "Brett neu suchen": sucht das Brett neu (in der Grundstellung werden auch die Figuren neu gelernt).
 - "Brett markieren": Quadrat von Hand über das Brett ziehen, Doppelklick = fertig, W = Seite tauschen.
 - Steht "Du bist dran"/"Gegner ist dran" falsch: einmal auf das Feld klicken.
 - "Diagnose-Bild": speichert ein Bildschirmfoto in %APPDATA%\SchachAssistent.
+  Dort liegt auch protokoll.txt – darin steht, was der Assistent erkannt hat.
 
 Hinweis: Die Pfeile sind in Bildschirmfotos unsichtbar (ab Windows 10, Version 2004),
 damit sie die Erkennung nie stören.

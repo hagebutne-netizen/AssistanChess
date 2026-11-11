@@ -4,7 +4,7 @@ Zweite App, die über deinem **eigenen** Schachspiel läuft: Bildschirm aufnehme
 besten Zug als Pfeil direkt über dem Brett anzeigen.
 
 ## PC-Version (Windows)
-**Download:** [`release/SchachAssistent-Setup-1.0.0.exe`](release/SchachAssistent-Setup-1.0.0.exe) → doppelklicken,
+**Download:** [`release/SchachAssistent-Setup-1.1.0.exe`](release/SchachAssistent-Setup-1.1.0.exe) → doppelklicken,
 installiert ohne Administratorrechte nach `%LOCALAPPDATA%\Programs\SchachAssistent` (Startmenü + Desktop-Verknüpfung).
 Java und Stockfish sind mit drin, es muss nichts anderes installiert werden.
 
@@ -13,6 +13,12 @@ Java und Stockfish sind mit drin, es muss nichts anderes installiert werden.
 - Stärke (1320–3190 Elo oder Maximal) und Spielstil (Solide … Aggressiv) direkt im Fenster.
 - **Mehrere Bildschirme:** „Automatisch – auf allen suchen“ oder fest Bildschirm 1/2/…; „Zeigen“ blendet auf jedem
   Bildschirm kurz seine Nummer ein. Beim Markieren wechselt **Tab** den Bildschirm.
+- **Vorausrechnen:** Während der Gegner überlegt, rechnet Stockfish schon die Antwort auf seinen wahrscheinlichsten Zug
+  (UCI-Ponder). Spielt er ihn, steht der Pfeil sofort da.
+- **Sicher gegen Störungen:** Solange eine Maustaste gedrückt ist (Figur wird gezogen), wird nicht gelesen; ein Zug zählt
+  erst, wenn ein zweites Foto dasselbe zeigt und er das Bild klar besser erklärt als "nichts passiert" (je Halbzug).
+  Zug-Punkte, Markierungen und halbe Animationen führen so nicht mehr zu Phantom-Zügen.
+- Protokoll: `%APPDATA%\SchachAssistent\protokoll.txt` (was erkannt wurde) – hilft bei der Fehlersuche.
 - Pfeile und Steuerfenster sind in Bildschirmfotos unsichtbar (`WDA_EXCLUDEFROMCAPTURE`, ab Windows 10 2004),
   Klicks gehen durch die Pfeile hindurch. Auf älteren Systemen werden sie aus der Erkennung herausgerechnet.
 - Code: `desktop/` (Swing + FlatLaf, JNA für Windows-Fensterfunktionen). Installer bauen: `desktop/packaging/build-windows.sh`

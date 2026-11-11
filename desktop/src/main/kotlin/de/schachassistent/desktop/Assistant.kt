@@ -56,7 +56,13 @@ class Assistant(private val ui: AssistantUi) {
     @Volatile private var flipRequested = false
     @Volatile private var pendingRegion: Region? = null
     private var worker: Thread? = null
-    private val log = System.getProperty("schach.debug") != null
+    private fun log(t: String) = Protokoll.log(t)
+
+    /** Eine laufende Stockfish-Suche. ponder = schon vorausgerechnet für den erwarteten Gegnerzug. */
+    private class Search(val gen: Int, val fen: String, val ponder: Boolean) { val hit = java.util.concurrent.atomic.AtomicBoolean(false) }
+    @Volatile private var current: Search? = null
+    /** zuletzt angezeigte Empfehlung (Stellung → Zug), um sie nach kurzen Störungen sofort wieder zu zeigen */
+    @Volatile private var shown: Pair<String, de.schachassistent.board.Move>? = null
 
     // ------------------------------------------------------------------ Steuerung (vom UI-Thread)
 
@@ -90,6 +96,7 @@ class Assistant(private val ui: AssistantUi) {
         useScreen(first)
         tracker.reset(); Settings.region?.let { tracker.setOrientation(it.whiteAtBottom) }
         running = true
+        log("Start · Bildschirme ${Screens.count} · Wahl ${Settings.screenChoice} · Elo ${Settings.elo} · Stil ${Settings.aggression}")
         ui.running(true); ui.turn(Turn.UNKNOWN)
         searchExec.submit { engine?.warmUp() }
         worker = Thread({ loop() }, "erkennung").apply { isDaemon = true; start() }
@@ -98,7 +105,9 @@ class Assistant(private val ui: AssistantUi) {
     fun stop() {
         running = false
         worker?.interrupt(); worker = null
+        generation.incrementAndGet(); current = null; searchingFen = null; shown = null; lastFen = null
         engine?.stop()
+        log("Gestoppt")
         overlay?.dispose(); overlay = null
         ui.running(false); ui.turn(Turn.UNKNOWN); ui.eval(""); ui.status("Gestoppt")
     }
@@ -159,10 +168,16 @@ class Assistant(private val ui: AssistantUi) {
         var nextLearn = 0L
         var nextVerify = 0L
         var detectTries = 0
+        var mouseDown = false
+        var mouseReleased = 0L
         while (running) {
             try {
                 Thread.sleep(POLL_MS)
                 if (marking) continue
+                // Maustaste gedrückt = es wird gerade eine Figur gezogen → nicht lesen, bis losgelassen
+                if (Win32.mouseButtonDown()) { mouseDown = true; continue }
+                if (mouseDown) { mouseDown = false; mouseReleased = System.currentTimeMillis() }
+                if (System.currentTimeMillis() - mouseReleased < 120) continue
                 if (redetect) { redetect = false; Settings.region = null; nextTry = 0L; nextLearn = 0L }
                 pendingRegion?.let { pendingRegion = null; setRegion(it); reference = null }
                 if (flipRequested) {
@@ -174,7 +189,7 @@ class Assistant(private val ui: AssistantUi) {
                 var region = Settings.region
                 if (region == null) {
                     if (System.currentTimeMillis() < nextTry) continue
-                    nextTry = System.currentTimeMillis() + 1500
+                    nextTry = System.currentTimeMillis() + 1200 + minOf(detectTries, 6) * 400   // seltener suchen, wenn lange nichts da ist
                     ui.status("Suche Schachbrett …")
                     detectTries++
                     // Ab und zu das eigene Fenster für ein Foto kurz ausblenden – es könnte das Brett verdecken
@@ -197,18 +212,18 @@ class Assistant(private val ui: AssistantUi) {
                 // Liegen eigene Pfeile im Bild (alte Windows-Versionen), öfter nachsehen
                 nextVerify = System.currentTimeMillis() + if (overlay?.hiddenFromCapture == false && overlay?.arrows?.isNotEmpty() == true) 1000 else VERIFY_MS
                 if (ref != null && !forceRead && verify && !changed(sig, ref)) {
-                    if (log) println("[prüfen] ${System.currentTimeMillis() % 100000} diff=${diffCount(sig, ref)} nan=${sig.count { it.isNaN() }}/${ref.count { it.isNaN() }}")
                     readAndRespond(region, quiet = true)
                     reference = signature(Settings.region ?: region)
                     continue
                 }
-                if (ref != null) { engine?.stop(); setArrows(emptyList()); ui.status("Zug erkannt …") }
-                if (log) println("[änderung] ${System.currentTimeMillis() % 100000} force=$forceRead")
-                var prev = sig
-                for (i in 0 until 15) {           // warten bis Animationen fertig sind
+                if (ref != null) { setArrows(emptyList()); ui.status("Zug erkannt …") }
+                // warten, bis das Bild ruhig ist (Animationen, Figur wird noch abgesetzt …): 2× hintereinander unverändert
+                var prev = sig; var calm = 0
+                for (i in 0 until 30) {
                     Thread.sleep(STABLE_MS)
+                    if (Win32.mouseButtonDown()) { calm = 0; continue }
                     val s = signature(region) ?: break
-                    if (!changed(s, prev)) break
+                    if (diffCount(s, prev, 18f) <= 2) { if (++calm >= 2) break } else calm = 0
                     prev = s
                 }
                 forceRead = false
@@ -264,7 +279,7 @@ class Assistant(private val ui: AssistantUi) {
         lastFen = null; forceRead = true
         setArrows(emptyList())
         ui.boardAt(r)
-        if (log) println("[brett] $r")
+        log("Brett: $r")
     }
 
     private fun learn(region: Region): Boolean {
@@ -286,71 +301,125 @@ class Assistant(private val ui: AssistantUi) {
             ui.status(if (isMostlyBlack(img)) "Bild ist schwarz – Aufnahme blockiert" else "Kein Brett erkannt")
             return false
         }
-        val r = tracker.update(cells, defaultSideToMove = region.whiteAtBottom)
-        if (log) println("[lesen] ${System.currentTimeMillis() % 100000} lesbar=$readable verdeckt=${cells.count { it == null }} -> ${r?.kind} ${r?.moves}")
+        val def = region.whiteAtBottom
+        val probe = tracker.update(cells, defaultSideToMove = def, commit = false)
+        val r: GameTracker.Result?
+        if (probe?.kind == GameTracker.Kind.MOVE) {
+            // Sicherung: ein Zug zählt erst, wenn ein zweites Foto kurz danach dasselbe zeigt
+            Thread.sleep(CONFIRM_MS)
+            if (Win32.mouseButtonDown()) { forceRead = true; return true }
+            val img2 = boardImg(region) ?: return false
+            val cells2 = t.scoreBoard(img2, mask(region, img2))
+            val again = tracker.update(cells2, defaultSideToMove = def, commit = false)
+            if (again == null || again.position.toFen() != probe.position.toFen()) {
+                log("Zug ${probe.moves} nicht bestätigt (zweites Foto: ${again?.moves}) – lese erneut")
+                forceRead = true; return true
+            }
+            r = tracker.update(cells2, defaultSideToMove = def)
+        } else r = tracker.update(cells, defaultSideToMove = def)
+        if (r?.kind != GameTracker.Kind.NO_CHANGE || !quiet)
+            log("Lesen: lesbar=$readable verdeckt=${cells.count { it == null }} → ${r?.kind ?: "unklar"} ${r?.moves ?: ""}")
         if (r == null) { if (!quiet) { ui.status("Prüfe Stellung …"); forceRead = true }; return false }
-        if (quiet && r.kind == GameTracker.Kind.MOVE) { engine?.stop(); setArrows(emptyList()) }
+        if (quiet && r.kind == GameTracker.Kind.MOVE) setArrows(emptyList())
         if (r.whiteAtBottom != region.whiteAtBottom) {
             val flipped = region.copy(whiteAtBottom = r.whiteAtBottom)
             Settings.region = flipped; overlay?.region = flipped
         }
         val fen = r.position.toFen()
         val mine = r.position.whiteToMove == r.whiteAtBottom
-        if (fen != lastFen || (mine && overlay?.arrows.isNullOrEmpty() && searchingFen != fen)) respond(r.position)
+        if (fen != lastFen) respond(r.position)
+        else if (mine && overlay?.arrows.isNullOrEmpty()) {
+            // gleiche Stellung, Pfeil war nur kurz weg (Störung) → sofort wieder zeigen statt neu zu rechnen
+            val sh = shown
+            if (sh != null && sh.first == fen) setArrows(listOf(Arrow(sh.second)))
+            else if (searchingFen != fen) respond(r.position)
+        }
         return true
     }
 
     private fun respond(pos: Position) {
         val fen = pos.toFen()
         lastFen = fen
-        if (log) println("[stellung] $fen")
+        log("Stellung: $fen")
         val myWhite = Settings.region?.whiteAtBottom ?: true
         val mine = pos.whiteToMove == myWhite
         ui.turn(if (mine) Turn.MINE else Turn.OPPONENT)
         if (!mine) setArrows(emptyList())
         val eng = engine ?: run { ui.status("Stockfish fehlt"); return }
-        val elo = Settings.elo.takeIf { it in 1320..3190 } ?: 0
-        val aggression = Settings.aggression / 100f
-        val multiPv = if (mine && aggression > 0.01f) 4 else 1
+
+        // Gegner hat genau den erwarteten Zug gespielt → die Vorausberechnung läuft einfach weiter
+        val cur = current
+        if (mine && cur != null && cur.ponder && cur.fen == fen && cur.gen == generation.get() && !cur.hit.getAndSet(true)) {
+            searchingFen = fen
+            eng.ponderhit()
+            log("Vorausberechnung getroffen")
+            ui.status("Wie erwartet – Antwort war schon vorausberechnet")
+            return
+        }
         val gen = generation.incrementAndGet()
+        val s = Search(gen, fen, ponder = false)
+        current = s
         searchingFen = fen
         eng.stop()
         searchExec.submit {
-            try { search(eng, pos, fen, gen, mine, elo, aggression, multiPv) } finally { if (gen == generation.get()) searchingFen = null }
+            try {
+                if (mine) searchMine(eng, pos, s) else searchOpponent(eng, pos, s)
+            } catch (e: Exception) {
+                log("Suche: ${e.message}")
+            }
         }
     }
 
-    private fun search(eng: Engine, pos: Position, fen: String, gen: Int, mine: Boolean, elo: Int, aggression: Float, multiPv: Int) {
-        run {
-            if (gen != generation.get()) return@run
-            ui.status(if (mine) "Rechne …" else "Gegner ist am Zug")
-            val res = eng.analyze(fen, if (mine) 1500 else 700, elo, multiPv) { u ->
-                if (gen == generation.get()) {
-                    if (mine && elo == 0 && multiPv == 1) setArrows(listOf(Arrow(u.move)))
-                    ui.eval(formatEval(u, mine))
-                }
+    /** Gegner am Zug: erst seinen wahrscheinlichsten Zug bestimmen, dann schon meine Antwort darauf rechnen. */
+    private fun searchOpponent(eng: Engine, pos: Position, s: Search) {
+        if (s.gen != generation.get()) return
+        ui.status("Gegner ist am Zug")
+        val pred = eng.analyze(s.fen, PREDICT_MS, 0, 1) { u -> if (s.gen == generation.get()) ui.eval(formatEval(u, false)) }
+        if (s.gen != generation.get()) return
+        if (pred == null) { searchingFen = null; return }
+        val m = pred.best
+        if (m !in pos.legalMoves()) return
+        val after = pos.apply(m)
+        if (after.legalMoves().isEmpty()) return
+        val p = Search(s.gen, after.toFen(), ponder = true)
+        current = p
+        ui.status("Gegner ist am Zug · ich rechne schon voraus (erwarte $m)")
+        searchMine(eng, after, p, baseFen = s.fen, moves = m.toString())
+    }
+
+    private fun searchMine(eng: Engine, pos: Position, s: Search, baseFen: String? = null, moves: String? = null) {
+        if (s.gen != generation.get()) return
+        val elo = Settings.elo.takeIf { it in 1320..3190 } ?: 0
+        val aggression = Settings.aggression / 100f
+        val multiPv = if (aggression > 0.01f) 4 else 1
+        if (!s.ponder) ui.status("Rechne …")
+        fun live() = s.gen == generation.get() && (!s.ponder || s.hit.get())
+        val res = eng.analyze(baseFen ?: s.fen, MY_MOVETIME_MS, elo, multiPv, moves, ponder = s.ponder, ponderHit = { s.hit.get() }) { u ->
+            if (live()) {
+                if (elo == 0 && multiPv == 1) setArrows(listOf(Arrow(u.move)))
+                ui.eval(formatEval(u, true))
             }
-            if (gen != generation.get()) return@run
-            if (res == null) {
-                setArrows(emptyList())
-                if (pos.legalMoves().isEmpty()) { ui.eval(if (pos.inCheck()) "Matt" else "Patt"); ui.status("Partie vorbei") }
-                else ui.status("Stockfish antwortet nicht – starte den Assistenten neu")
-                return@run
-            }
-            var move = res.best
-            if (aggression > 0.01f && res.lines.size > 1) {
-                val cands = res.lines.map { MoveStyle.Candidate(it.move, it.comparableCp) }
-                val ref = cands.firstOrNull { it.move == move }
-                val pool = if (elo != 0 && ref != null) cands.filter { it.scoreCp <= ref.scoreCp + 30 } else cands
-                MoveStyle.choose(pos, pool, aggression)?.let { move = it }
-            }
-            res.lines.firstOrNull { it.move == move }?.let { ui.eval(formatEval(it, mine)) }
-            if (log) println("[zug] ${if (mine) "EMPFEHLUNG" else "gegner"} $move  ${res.lines.firstOrNull()?.let { formatEval(it, mine) }}")
-            if (mine) {
-                setArrows(listOf(Arrow(move)))
-                ui.status("Bester Zug: $move  ·  Stärke ${if (elo == 0) "max" else "$elo Elo"}  ·  Stil ${Settings.aggression} %")
-            } else ui.status("Gegner ist am Zug")
         }
+        if (!live()) { if (s.ponder && s.gen != generation.get()) log("Vorausberechnung verworfen (anderer Zug)"); return }
+        searchingFen = null
+        if (res == null) {
+            setArrows(emptyList())
+            if (pos.legalMoves().isEmpty()) { ui.eval(if (pos.inCheck()) "Matt" else "Patt"); ui.status("Partie vorbei") }
+            else ui.status("Stockfish antwortet nicht – starte den Assistenten neu")
+            return
+        }
+        var move = res.best
+        if (aggression > 0.01f && res.lines.size > 1) {
+            val cands = res.lines.map { MoveStyle.Candidate(it.move, it.comparableCp) }
+            val ref = cands.firstOrNull { it.move == move }
+            val pool = if (elo != 0 && ref != null) cands.filter { it.scoreCp <= ref.scoreCp + 30 } else cands
+            MoveStyle.choose(pos, pool, aggression)?.let { move = it }
+        }
+        res.lines.firstOrNull { it.move == move }?.let { ui.eval(formatEval(it, true)) }
+        log("Empfehlung: $move  ${res.lines.firstOrNull()?.let { formatEval(it, true) } ?: ""}${if (s.ponder) "  (vorausberechnet)" else ""}")
+        shown = s.fen to move
+        setArrows(listOf(Arrow(move)))
+        ui.status("Bester Zug: $move  ·  Stärke ${if (elo == 0) "max" else "$elo Elo"}  ·  Stil ${Settings.aggression} %")
     }
 
     // ------------------------------------------------------------------ Helfer
@@ -395,9 +464,9 @@ class Assistant(private val ui: AssistantUi) {
         return out
     }
 
-    private fun diffCount(a: FloatArray, b: FloatArray): Int {
+    private fun diffCount(a: FloatArray, b: FloatArray, threshold: Float = 30f): Int {
         var count = 0
-        for (i in a.indices) { val x = a[i]; val y = b[i]; if (!x.isNaN() && !y.isNaN() && abs(x - y) > 30f) count++ }
+        for (i in a.indices) { val x = a[i]; val y = b[i]; if (!x.isNaN() && !y.isNaN() && abs(x - y) > threshold) count++ }
         return count
     }
 
@@ -421,8 +490,11 @@ class Assistant(private val ui: AssistantUi) {
 
     private companion object {
         const val POLL_MS = 150L
-        const val STABLE_MS = 120L
+        const val STABLE_MS = 90L
         const val READABLE = 0.3f
         const val VERIFY_MS = 2500L
+        const val CONFIRM_MS = 140L
+        const val PREDICT_MS = 350L
+        const val MY_MOVETIME_MS = 1500L
     }
 }
