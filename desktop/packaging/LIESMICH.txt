@@ -1,0 +1,26 @@
+Schach-Assistent – PC-Version
+=============================
+
+So geht's
+1. Öffne dein Schachspiel so, dass das ganze Brett zu sehen ist.
+2. Starte den Schach-Assistenten und stelle Stärke (Elo) und Spielstil ein.
+3. Klicke auf "Assistent starten".
+   Beim allerersten Mal: eine NEUE Partie öffnen (Grundstellung) – der Assistent
+   lernt dann einmal die Figuren deines Spiels. Danach erkennt er alles allein.
+4. Bist du am Zug, erscheint ein grüner Pfeil mit dem besten Zug über dem Brett.
+   Klicks gehen durch den Pfeil hindurch – du spielst ganz normal weiter.
+
+Falls etwas nicht klappt
+- "Brett neu suchen": sucht das Brett neu (in der Grundstellung werden auch die Figuren neu gelernt).
+- "Brett markieren": Quadrat von Hand über das Brett ziehen, Doppelklick = fertig, W = Seite tauschen.
+- Steht "Du bist dran"/"Gegner ist dran" falsch: einmal auf das Feld klicken.
+- "Diagnose-Bild": speichert ein Bildschirmfoto in %APPDATA%\SchachAssistent.
+
+Hinweis: Die Pfeile sind in Bildschirmfotos unsichtbar (ab Windows 10, Version 2004),
+damit sie die Erkennung nie stören.
+
+Lizenzen
+- Stockfish 17.1 (engine\stockfish.exe) steht unter der GNU GPL Version 3 (engine\Copying.txt).
+  Quellcode: https://github.com/official-stockfish/Stockfish/tree/sf_17.1
+- Java-Laufzeit: Eclipse Temurin 21 (GPLv2 mit Classpath Exception), runtime\legal.
+- FlatLaf (Apache 2.0), JNA (Apache 2.0 / LGPL 2.1).

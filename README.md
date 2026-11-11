@@ -1,7 +1,23 @@
-# Schach-Assistent (Android, Kotlin)
+# Schach-Assistent (Android + Windows-PC, Kotlin)
 
 Zweite App, die über deinem **eigenen** Schachspiel läuft: Bildschirm aufnehmen, Brett erkennen,
 besten Zug als Pfeil direkt über dem Brett anzeigen.
+
+## PC-Version (Windows)
+**Download:** [`release/SchachAssistent-Setup-1.0.0.exe`](release/SchachAssistent-Setup-1.0.0.exe) → doppelklicken,
+installiert ohne Administratorrechte nach `%LOCALAPPDATA%\Programs\SchachAssistent` (Startmenü + Desktop-Verknüpfung).
+Java und Stockfish sind mit drin, es muss nichts anderes installiert werden.
+
+- Gleiche Erkennung wie auf dem Handy (Modul `chesscore`): Brett finden → Figuren aus der Grundstellung lernen →
+  jeder Zug wird mit den Schachregeln geprüft → Stockfish → grüner Pfeil, wenn du dran bist.
+- Stärke (1320–3190 Elo oder Maximal) und Spielstil (Solide … Aggressiv) direkt im Fenster.
+- **Mehrere Bildschirme:** „Automatisch – auf allen suchen“ oder fest Bildschirm 1/2/…; „Zeigen“ blendet auf jedem
+  Bildschirm kurz seine Nummer ein. Beim Markieren wechselt **Tab** den Bildschirm.
+- Pfeile und Steuerfenster sind in Bildschirmfotos unsichtbar (`WDA_EXCLUDEFROMCAPTURE`, ab Windows 10 2004),
+  Klicks gehen durch die Pfeile hindurch. Auf älteren Systemen werden sie aus der Erkennung herausgerechnet.
+- Code: `desktop/` (Swing + FlatLaf, JNA für Windows-Fensterfunktionen). Installer bauen: `desktop/packaging/build-windows.sh`
+  (jlink-Laufzeit, kleiner C-Starter `SchachAssistent.exe`, NSIS).
+- Test ohne Windows: `desktop/src/test/.../FakeGame.kt` spielt eine Partie mit deinen Figuren ab (unter Xvfb).
 
 ## Öffnen & starten
 1. Android Studio → *Open* → diesen Ordner wählen. Gradle-Sync abwarten.
