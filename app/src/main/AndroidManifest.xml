@@ -6,6 +6,8 @@
     <!-- Foreground-Service für die Bildschirmaufnahme -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Modus "Direkt vom Spiel" (ohne Bildschirmaufnahme) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Ab Android 13 für die (Pflicht-)Benachrichtigung des Services -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -37,6 +39,10 @@
         <service
             android:name=".capture.AssistantService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Overlay zeigt Schach-Zugempfehlungen über dem eigenen Spiel des Nutzers" />
+        </service>
     </application>
 </manifest>

@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { pickGame() }
         }
         val settingsCard = buildSettingsCard()
+        val modeCard = buildModeSwitch()
         val steps = TextView(this).apply {
             text = "1  START  ·  2  Aufnahme erlauben  ·  3  Neue Partie\n" +
                 "Lange auf ♞ drücken speichert ein Diagnose-Bild."
@@ -107,6 +108,7 @@ class MainActivity : AppCompatActivity() {
             addView(View(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
             addView(startButton, LinearLayout.LayoutParams(dp(170), dp(170)))
             addView(View(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
+            addView(modeCard, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
             addView(settingsCard, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
             addView(gameRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
             addView(steps, LinearLayout.LayoutParams(-1, -2))
@@ -135,6 +137,12 @@ class MainActivity : AppCompatActivity() {
             )
             return
         }
+        if (prefs.getBoolean(KEY_DIRECT, false)) {
+            // Ohne Bildschirmaufnahme: das Spiel schickt die Stellung selbst
+            AssistantService.startDirect(this)
+            openGameOrLeave()
+            return
+        }
         val mpm = getSystemService(MediaProjectionManager::class.java)
         val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14+: direkt "Gesamter Bildschirm", ohne Auswahl
@@ -147,6 +155,41 @@ class MainActivity : AppCompatActivity() {
         val pkg = prefs.getString(KEY_GAME, null)
         val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
         if (launch != null) startActivity(launch) else moveTaskToBack(true)
+    }
+
+    // ---------------------------------------------------------------- Modus
+
+    /** Bild erkennen (Bildschirmaufnahme) oder Direkt vom Spiel (FEN, ohne Aufnahme). */
+    private fun buildModeSwitch(): View {
+        val hint = TextView(this).apply {
+            textSize = 12f; setTextColor(Color.argb(160, 255, 255, 255)); setPadding(dp(4), dp(8), dp(4), 0)
+        }
+        val options = listOf("Bild erkennen" to false, "Direkt vom Spiel" to true)
+        val chips = options.map { (label, _) ->
+            TextView(this).apply {
+                text = label; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                setTextColor(Color.WHITE); setPadding(0, dp(10), 0, dp(10))
+                background = GradientDrawable().apply { cornerRadius = dp(12).toFloat() }
+            }
+        }
+        fun refresh() {
+            val direct = prefs.getBoolean(KEY_DIRECT, false)
+            chips.forEachIndexed { i, c -> (c.background as GradientDrawable).setColor(if (options[i].second == direct) GREEN_DARK else CARD) }
+            hint.text = if (direct) "Keine Bildschirmaufnahme nötig – funktioniert auch, wenn Samsung das Bild schwärzt. Dein Spiel schickt die Stellung (siehe GAME_INTEGRATION.md)."
+            else "Liest das Brett vom Bildschirm. Zeigt die Aufnahme nur Schwarz, nimm „Direkt vom Spiel“."
+        }
+        chips.forEachIndexed { i, c -> c.setOnClickListener { prefs.edit().putBoolean(KEY_DIRECT, options[i].second).apply(); refresh() } }
+        refresh()
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            chips.forEach { addView(it, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(3); marginEnd = dp(3) }) }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(Color.rgb(22, 25, 31)) }
+            setPadding(dp(8), dp(8), dp(8), dp(10))
+            addView(row); addView(hint)
+        }
     }
 
     // ---------------------------------------------------------------- Einstellungen
@@ -241,6 +284,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val KEY_GAME = "game_package"
+        const val KEY_DIRECT = "direct_mode"
         const val KEY_ELO = "elo"
         const val KEY_AGGRESSION = "aggression"
         val BG = Color.rgb(15, 17, 21)

@@ -78,6 +78,8 @@ class BoardVision(context: Context, private val capturer: ScreenCapturer) {
 class BroadcastFenSource(private val context: Context) {
 
     @Volatile var latestFen: String? = null; private set
+    /** Optional vom Spiel mitgeschickt: Brett auf dem Bildschirm (Pixel) und Ausrichtung. */
+    @Volatile var latestBoard: de.schachassistent.board.BoardRegion? = null; private set
     /** Wird auf dem Main-Thread aufgerufen, sobald ein neuer gültiger FEN ankommt. */
     var onNewFen: (() -> Unit)? = null
 
@@ -86,7 +88,15 @@ class BroadcastFenSource(private val context: Context) {
             val raw = intent.getStringExtra(EXTRA_FEN) ?: return
             val fen = Fen.normalize(raw)
             if (fen == null) { Log.w(TAG, "Ungültiger FEN ignoriert: $raw"); return }
-            if (fen == latestFen) return
+            // "board" = "links,oben,größe" in Bildschirmpixeln; "whiteBottom" = true/false
+            val board = intent.getStringExtra(EXTRA_BOARD)?.split(',')?.mapNotNull { it.trim().toFloatOrNull() }
+            if (board != null && board.size >= 3 && board[2] > 0) {
+                val wab = intent.getBooleanExtra(EXTRA_WHITE_BOTTOM, latestBoard?.whiteAtBottom ?: true)
+                latestBoard = de.schachassistent.board.BoardRegion(board[0], board[1], board[2], board.getOrElse(3) { board[2] }, wab)
+            } else if (intent.hasExtra(EXTRA_WHITE_BOTTOM)) {
+                latestBoard = latestBoard?.copy(whiteAtBottom = intent.getBooleanExtra(EXTRA_WHITE_BOTTOM, true))
+            }
+            if (fen == latestFen && board == null) return
             latestFen = fen
             onNewFen?.invoke()
         }
@@ -103,6 +113,8 @@ class BroadcastFenSource(private val context: Context) {
     companion object {
         const val ACTION_FEN = "de.schachassistent.FEN"
         const val EXTRA_FEN = "fen"
+        const val EXTRA_BOARD = "board"
+        const val EXTRA_WHITE_BOTTOM = "whiteBottom"
         private const val TAG = "BroadcastFenSource"
     }
 }

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -48,14 +49,29 @@ class AssistantService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
             ACTION_START -> handleStart(intent)
+            ACTION_START_DIRECT -> handleStartDirect()
             ACTION_STOP -> stopSelf()
         }
         // Nicht automatisch neu starten: ohne frische Nutzer-Zustimmung gibt es keine MediaProjection.
         return START_NOT_STICKY
     }
 
+    /**
+     * Modus "Direkt vom Spiel": keine Bildschirmaufnahme. Das Spiel schickt Stellung (und
+     * optional Brettposition) per Broadcast. Funktioniert auch, wenn Samsung oder das Spiel
+     * die Aufnahme schwärzt.
+     */
+    private fun handleStartDirect() {
+        if (_running.value) return
+        ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, buildNotification(),
+            if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+        )
+        setUp(null)
+    }
+
     private fun handleStart(intent: Intent) {
-        if (projection != null) return // läuft schon
+        if (projection != null || _running.value) return // läuft schon
 
         // 1) ZUERST in den Vordergrund. Ab Android 14 muss das vor getMediaProjection() passieren.
         ServiceCompat.startForeground(
@@ -87,9 +103,12 @@ class AssistantService : LifecycleService() {
             }
         }, Handler(Looper.getMainLooper()))
 
-        // 3) Bausteine aufbauen
+        setUp(ScreenCapturer(this, proj).also { it.start() })
+    }
+
+    /** Bausteine aufbauen. [cap] == null: Modus "Direkt vom Spiel" ohne Bilderkennung. */
+    private fun setUp(cap: ScreenCapturer?) {
         val store = BoardCalibrationStore(this)
-        val cap = ScreenCapturer(this, proj).also { it.start() }
         capturer = cap
         val fen = BroadcastFenSource(this).also { it.register() }
         fenSource = fen
@@ -103,7 +122,7 @@ class AssistantService : LifecycleService() {
             store = store,
             directFen = fen,
             capturer = cap,
-            vision = BoardVision(this, cap),
+            vision = cap?.let { BoardVision(this, it) },
             engineFactory = EngineFactory(this),
         )
         pipeline = pipe
@@ -116,7 +135,8 @@ class AssistantService : LifecycleService() {
         ov.onClose = { stopSelf() }
         fen.onNewFen = { pipe.onDirectFen() } // Spiel schickt neue Stellung -> sofort rechnen
         ov.show()
-        pipe.startLive() // Ein Klick: ab jetzt läuft alles automatisch
+        if (cap != null) pipe.startLive() // Ein Klick: ab jetzt läuft alles automatisch
+        else pipe.startDirectMode()
 
         _running.value = true
     }
@@ -162,6 +182,7 @@ class AssistantService : LifecycleService() {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_START = "de.schachassistent.START"
         private const val ACTION_STOP = "de.schachassistent.STOP"
+        private const val ACTION_START_DIRECT = "de.schachassistent.START_DIRECT"
         private const val EXTRA_RESULT_CODE = "resultCode"
         private const val EXTRA_DATA = "data"
 
@@ -174,6 +195,11 @@ class AssistantService : LifecycleService() {
                 .putExtra(EXTRA_RESULT_CODE, resultCode)
                 .putExtra(EXTRA_DATA, data)
             ContextCompat.startForegroundService(context, i)
+        }
+
+        /** Ohne Bildschirmaufnahme starten (Stellung kommt direkt vom Spiel). */
+        fun startDirect(context: Context) {
+            ContextCompat.startForegroundService(context, Intent(context, AssistantService::class.java).setAction(ACTION_START_DIRECT))
         }
 
         fun stop(context: Context) {

@@ -46,8 +46,9 @@ class AnalysisPipeline(
     private val overlay: OverlayController,
     private val store: BoardCalibrationStore,
     private val directFen: BroadcastFenSource,
-    private val capturer: ScreenCapturer,
-    private val vision: BoardVision,
+    /** null im Modus "Direkt vom Spiel" (keine Bildschirmaufnahme) */
+    private val capturer: ScreenCapturer?,
+    private val vision: BoardVision?,
     private val engineFactory: EngineFactory,
 ) {
     private val tracker = GameTracker().also { t -> store.load()?.let { t.setOrientation(it.whiteAtBottom) } }
@@ -67,7 +68,15 @@ class AnalysisPipeline(
 
     // ------------------------------------------------------------------ Aktionen der Leiste
 
+    /** Modus ohne Bildschirmaufnahme: nur auf Stellungen vom Spiel warten. */
+    fun startDirectMode() {
+        overlay.setLive(true)
+        overlay.setTurn(Turn.UNKNOWN)
+        overlay.setStatus(if (store.load() == null) "Direkt-Modus: warte auf Stellung vom Spiel. Brett ggf. mit ⌖ markieren." else "Direkt-Modus: warte auf Stellung vom Spiel …")
+    }
+
     fun startLive() {
+        if (capturer == null) { startDirectMode(); return }
         if (isLive) return
         liveJob = scope.launch { liveLoop() }
         overlay.setLive(true)
@@ -83,6 +92,7 @@ class AnalysisPipeline(
 
     /** Brett neu suchen und – falls Grundstellung – Figuren neu einlernen. */
     fun autoSetup() {
+        if (vision == null) { overlay.setStatus("Direkt-Modus: Brett kommt vom Spiel oder per ⌖"); return }
         scope.launch {
             overlay.setStatus("Suche Schachbrett …")
             val region = detectBoard()
@@ -105,6 +115,7 @@ class AnalysisPipeline(
     /** Sofort neu lesen und rechnen. */
     fun analyzeOnce() {
         forceRead = true
+        if (capturer == null) { onDirectFen(); return }
         if (!isLive) scope.launch { readAndRespond() }
     }
 
@@ -115,7 +126,16 @@ class AnalysisPipeline(
     }
 
     /** Stellung kam direkt vom Spiel. */
-    fun onDirectFen() { directFen.latestFen?.let { respond(Position.fromFen(it)) } }
+    fun onDirectFen() {
+        val fen = directFen.latestFen ?: return
+        directFen.latestBoard?.let { b ->
+            if (b != store.load()) { store.save(b); overlay.setRegion(b); tracker.setOrientation(b.whiteAtBottom) }
+        }
+        if (store.load() == null) {
+            overlay.setStatus("Stellung empfangen ✓ – Brett einmal mit ⌖ markieren, dann kommen Pfeile.")
+        }
+        respond(Position.fromFen(fen))
+    }
 
     fun onRegionChanged() {
         tracker.reset()
@@ -126,7 +146,7 @@ class AnalysisPipeline(
     /** Lange auf ♞ drücken: aktuellen Bildschirm speichern, damit man Erkennungsprobleme nachvollziehen kann. */
     fun saveDiagnostics() {
         scope.launch {
-            val img = capturer.fullImg() ?: return@launch
+            val img = capturer?.fullImg() ?: run { overlay.setStatus("Direkt-Modus: keine Bildschirmaufnahme"); return@launch }
             val name = withContext(Dispatchers.IO) {
                 val bmp = Bitmap.createBitmap(img.pixels, img.width, img.height, Bitmap.Config.ARGB_8888)
                 val fileName = "schach_diagnose_${System.currentTimeMillis()}.png"
@@ -162,6 +182,9 @@ class AnalysisPipeline(
     // ------------------------------------------------------------------ Live-Schleife
 
     private suspend fun CoroutineScope.liveLoop() {
+        val capturer = capturer ?: return
+        val vision = vision ?: return
+        var blackSince = 0L
         var reference: FloatArray? = null
         var lastFrame = -1L
         var failures = 0
@@ -170,6 +193,17 @@ class AnalysisPipeline(
             delay(POLL_MS)
             if (overlay.isSelecting) continue
             if (directFen.latestFen != null) continue   // Spiel liefert die Stellung selbst
+
+            // Schwarzes Bild? (Samsung/Spiel blockiert die Aufnahme, z. B. FLAG_SECURE)
+            if (capturer.isMostlyBlack()) {
+                if (blackSince == 0L) blackSince = System.currentTimeMillis()
+                if (System.currentTimeMillis() - blackSince > 2500) {
+                    overlay.clearArrows(); overlay.setTurn(Turn.UNKNOWN)
+                    overlay.setStatus("Aufnahme ist schwarz – das Spiel/Samsung blockiert sie. Nutze den Modus „Direkt vom Spiel“.")
+                }
+                delay(500); continue
+            }
+            blackSince = 0L
 
             var region = store.load()
             if (region == null) {
@@ -226,6 +260,7 @@ class AnalysisPipeline(
 
     /** Liest die Stellung und reagiert. @return false, wenn kein Brett lesbar war. */
     private suspend fun readAndRespond(): Boolean {
+        val vision = vision ?: return false
         val region = store.load() ?: return false
         if (!vision.hasTemplates) return false
         val cells = vision.scores(region, overlay.occlusionMask(region)) ?: return false
@@ -316,7 +351,7 @@ class AnalysisPipeline(
     private fun mySide(region: BoardRegion) = if (region.whiteAtBottom) 'w' else 'b'
 
     private suspend fun detectBoard(): BoardRegion? {
-        val r = vision.detectBoard() ?: return null
+        val r = vision?.detectBoard() ?: return null
         val old = store.load()
         val region = BoardRegion(r.left, r.top, r.size, r.size, old?.whiteAtBottom ?: true)
         store.save(region)
@@ -327,7 +362,7 @@ class AnalysisPipeline(
 
     private suspend fun learnIfStart(region: BoardRegion): Boolean {
         overlay.moveBarOffBoard(region)
-        val whiteAtBottom = vision.learn(region, overlay.occlusionMask(region)) ?: return false
+        val whiteAtBottom = vision?.learn(region, overlay.occlusionMask(region)) ?: return false
         val updated = region.copy(whiteAtBottom = whiteAtBottom)
         store.save(updated)
         overlay.setRegion(updated)
@@ -337,7 +372,7 @@ class AnalysisPipeline(
 
     private fun signature(region: BoardRegion): FloatArray? {
         val w = region.width.roundToInt(); val h = region.height.roundToInt()
-        return capturer.signature(region.left.roundToInt().toFloat(), region.top.roundToInt().toFloat(), w, h, overlay.occlusionMask(region))
+        return capturer?.signature(region.left.roundToInt().toFloat(), region.top.roundToInt().toFloat(), w, h, overlay.occlusionMask(region))
     }
 
     /** Hat sich das Brett verändert? Zählt deutlich veränderte Messpunkte (eigene Zeichnungen ausgenommen). */

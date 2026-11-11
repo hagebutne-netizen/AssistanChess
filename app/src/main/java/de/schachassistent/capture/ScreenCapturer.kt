@@ -106,6 +106,18 @@ class ScreenCapturer(private val context: Context, private val projection: Media
 
     fun fullImg(): Img? = cropImg(0, 0, width, height)
 
+    /** true, wenn das letzte Bild (fast) komplett schwarz ist – Aufnahme wird blockiert. */
+    fun isMostlyBlack(): Boolean = synchronized(lock) {
+        val b = buffer ?: return false
+        var dark = 0; var total = 0
+        for (j in 0 until 24) for (i in 0 until 12) {
+            val c = b.getPixel(((i + 0.5f) * width / 12).toInt().coerceIn(0, width - 1), ((j + 0.5f) * height / 24).toInt().coerceIn(0, height - 1))
+            if (Img.lum(c) < 6) dark++
+            total++
+        }
+        dark >= total * 0.97
+    }
+
     /** Zähler, der bei jedem neuen Bild steigt (zum billigen Prüfen "hat sich etwas getan?"). */
     fun frameNumber(): Long = synchronized(lock) { frameCounter }
 
